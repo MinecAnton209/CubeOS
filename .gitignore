@@ -23,3 +23,7 @@ target/
 *.a
 *.tar
 int
+src/cube_core/Cargo.lock
+Cargo.lock
+iso/
+libkernel.a

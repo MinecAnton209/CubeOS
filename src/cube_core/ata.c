@@ -165,3 +165,13 @@ int ata_write_sector_c(unsigned int lba, const unsigned char *buf) {
     if (inb(ATA_STATUS) & STATUS_ERR) return 0;
     return 1;
 }
+
+#if defined(__x86_64__) || defined(__i386__)
+void __attribute__((noreturn)) __stack_chk_fail(void) {
+    while (1) {}
+}
+
+void __stack_chk_fail_local(void) {
+    __stack_chk_fail();
+}
+#endif
