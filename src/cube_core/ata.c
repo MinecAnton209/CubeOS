@@ -1,4 +1,5 @@
 // src/ata.c – с таймаутами и защитой от зависания
+#include <stdint.h>
 
 #define ATA_DATA    0x1F0
 #define ATA_ERROR   0x1F1
@@ -158,7 +159,7 @@ int ata_write_sector_c(unsigned int lba, const unsigned char *buf) {
 
     for (int i = 0; i < 256; i++) {
         unsigned short word = (buf[i * 2 + 1] << 8) | buf[i * 2];
-        __asm__ volatile ("outw %0, %1" : : "a"(word), "Nd"(ATA_DATA));
+        __asm__ volatile ("outw %0, %1" : : "a"(word), "d"((uint16_t)ATA_DATA));
     }
 
     if (inb(ATA_STATUS) & STATUS_ERR) return 0;

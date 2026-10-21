@@ -64,6 +64,7 @@ pub fn send_eoi() {
 pub fn send_eoi_slave() {
     outb(PIC2_CMD, 0x20);
     outb(PIC1_CMD, 0x20);
+}
 
 /// Разрешить конкретный IRQ
 pub fn enable_irq(irq: u8) {
