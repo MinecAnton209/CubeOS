@@ -1,0 +1,57 @@
+name: CubeOS CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    # 1. Устанавливаем зависимости для сборки ядра, ISO и (если нужно) HDD
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y nasm gcc build-essential xorriso mtools grub-pc-bin grub-common parted dosfstools
+
+    # 2. Устанавливаем Rust nightly
+    - name: Install Rust nightly
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        components: rust-src, llvm-tools-preview
+
+    # 3. Собираем ядро через make
+    - name: Build Kernel
+      run: make
+
+    # 4. Собираем ISO через make (это проверит работу GRUB и xorriso)
+    - name: Build ISO
+      run: make cubeos.iso
+
+    # 5. (Опционально) Пытаемся собрать HDD-образ
+    # Если этот шаг упадет из-за ограничений loop-устройств на GitHub, 
+    # мы просто поставим || true, чтобы не ломать билд.
+    - name: Build HDD Image
+      run: |
+        sudo bash create_hdd.sh || echo "HDD build failed or skipped in CI"
+      continue-on-error: true
+
+    # 6. Сохраняем собранные артефакты (чтобы их можно было скачать)
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: CubeOS-Builds
+        path: |
+          kernel.elf
+          cubeos.iso
+          cubeos.img
+        if-no-files-found: warn
