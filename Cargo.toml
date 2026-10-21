@@ -1,0 +1,31 @@
+[package]
+name = "cubeos"
+version = "1.0.0-dev"
+edition = "2021"
+authors = ["CubeDev"]
+description = "CubeOS - 64-bit operating system written in Rust"
+license = "GPL-3.0"
+repository = "https://github.com/cubeweb-lab/cubeos"
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/mod.rs"
+
+[features]
+default = ["kernel-normal"]
+kernel-normal = []
+kernel-debug = []
+kernel-backup = []
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+debug = true
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = "z"
+codegen-units = 1
