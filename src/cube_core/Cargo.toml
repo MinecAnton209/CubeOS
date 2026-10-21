@@ -1,0 +1,9 @@
+[package]
+name = "cube_core"
+version = "1.0.0"
+edition = "2021"
+
+[lib]
+name = "cube_core"
+crate-type = ["staticlib"]
+path = "lib.rs"
