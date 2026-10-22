@@ -1,112 +1,68 @@
-// src/kernel/loader.rs
+// src/cube_core/loader.rs — загрузчик программ
+use crate::elf;
+use crate::fs::FSManager;
+use crate::ata::AtaDrive;
 
-use crate::ata::AtaController;
-use crate::vfs::VirtualFS;
+static mut PROGRAM_BUF: [u8; 65536] = [0; 65536];
 
-pub struct AppMetadata {
-    pub name: String,
-    pub version: String,
-    pub author: String,
-    pub signature: [u8; 64],
-    pub entry_point: u64,
-}
+pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
+    crate::serial::send_string("[LOADER] Loading: ");
+    crate::serial::send_string(path);
+    crate::serial::send_string("\n");
 
-pub struct DriverMetadata {
-    pub name: String,
-    pub version: String,
-    pub signature: [u8; 64],
-}
+    unsafe {
+        let size = match fs.read_file(ata, path, &mut PROGRAM_BUF) {
+            Some(s) => {
+                crate::serial::send_string("[LOADER] Read ");
+                let mut num_buf = [0u8; 20];
+                let mut n = s;
+                let mut i = 20;
+                while n > 0 { i -= 1; num_buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+                crate::serial::send_string(core::str::from_utf8(&num_buf[i..]).unwrap_or("?"));
+                crate::serial::send_string(" bytes\n");
+                s
+            },
+            None => {
+                crate::serial::send_string("[LOADER] ERROR: File not found!\n");
+                return false;
+            }
+        };
 
-pub fn load_driver(ata: &AtaController, vfs: &VirtualFS, path: &str) -> Result<DriverMetadata, &'static str> {
-    // 1. Читаем заголовок драйвера
-    let mut header = [0u8; 64];
-    vfs.read_file(ata, path, &mut header)
-        .ok_or("Failed to read driver header")?;
-
-    // 2. Проверяем магию
-    let magic = core::str::from_utf8(&header[0..4])
-        .map_err(|_| "Invalid driver magic")?;
-
-    if magic != "CDRV" {
-        return Err("Invalid driver signature");
-    }
-
-    // 3. Проверяем подпись
-    let signature = &header[4..68];
-    if !verify_driver_signature(signature) {
-        return Err("Invalid driver signature");
-    }
-
-    // 4. Читаем метаданные
-    let name = extract_string(&header, 68, 32);
-    let version = extract_string(&header, 100, 16);
-
-    Ok(DriverMetadata {
-        name,
-        version,
-        signature: [0; 64],
-    })
-}
-
-pub fn verify_app_signature(ata: &AtaController, vfs: &VirtualFS, path: &str) -> Result<AppMetadata, &'static str> {
-    // Аналогично драйверам, но с проверкой через публичный ключ
-    let mut header = [0u8; 128];
-    vfs.read_file(ata, path, &mut header)
-        .ok_or("Failed to read app header")?;
-
-    let magic = core::str::from_utf8(&header[0..4])
-        .map_err(|_| "Invalid app magic")?;
-
-    if magic != "CEXC" {
-        return Err("Invalid app signature");
-    }
-
-    // Проверяем подпись через публичный ключ CubeDev
-    let signature = &header[4..68];
-    let public_key = [0u8; 32]; // Загружаем из безопасного хранилища
-
-    if !verify_signature(signature, &public_key) {
-        return Err("Invalid app signature");
-    }
-
-    let name = extract_string(&header, 68, 32);
-    let version = extract_string(&header, 100, 16);
-    let entry_point = u64::from_le_bytes(header[116..124].try_into().unwrap());
-
-    Ok(AppMetadata {
-        name,
-        version,
-        author: "CubeDev".to_string(),
-        signature: [0; 64],
-        entry_point,
-    })
-}
-
-fn verify_driver_signature(signature: &[u8]) -> bool {
-    // Проверка подписи драйвера через ключ ядра
-    // Простая проверка пока
-    signature[0] != 0
-}
-
-fn verify_signature(signature: &[u8], public_key: &[u8]) -> bool {
-    // Ed25519 верификация
-    // Пока упрощенно
-    true
-}
-
-fn extract_string(data: &[u8], offset: usize, max_len: usize) -> String {
-    let mut result = String::new();
-    let end = offset + max_len;
-    let mut i = offset;
-
-    while i < end && i < data.len() {
-        let c = data[i];
-        if c == 0 { break; }
-        if c.is_ascii() {
-            result.push(c as char);
+        if size == 0 {
+            crate::serial::send_string("[LOADER] ERROR: File is empty!\n");
+            return false;
         }
-        i += 1;
+
+        // Проверяем ELF magic
+        if PROGRAM_BUF[0] != 0x7F || PROGRAM_BUF[1] != b'E' || PROGRAM_BUF[2] != b'L' || PROGRAM_BUF[3] != b'F' {
+            crate::serial::send_string("[LOADER] ERROR: Not a valid ELF file!\n");
+            return false;
+        }
+
+        crate::serial::send_string("[LOADER] Valid ELF detected\n");
+
+        let program = match elf::load_elf(&PROGRAM_BUF[..size]) {
+            Some(p) => p,
+            None => {
+                crate::serial::send_string("[LOADER] ERROR: ELF load failed\n");
+                return false;
+            }
+        };
+
+        crate::serial::send_string("[LOADER] Entry: 0x");
+        let mut hex_buf = [0u8; 16];
+        for i in 0..16 {
+            let nibble = ((program.entry_point >> ((15 - i) * 4)) & 0xF) as u8;
+            hex_buf[i] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+        }
+        crate::serial::send_string(core::str::from_utf8(&hex_buf).unwrap_or("?"));
+        crate::serial::send_string("\n");
+
+        crate::serial::send_string("[LOADER] Jumping...\n");
+
+        let entry: extern "C" fn() = core::mem::transmute(program.entry_point);
+        entry();
     }
 
-    result
+    false
 }

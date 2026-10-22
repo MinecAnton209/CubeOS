@@ -98,6 +98,7 @@ sudo tee /mnt/cubeos/system/config/boot.cfg > /dev/null << 'EOF'
 # CubeOS Boot Configuration
 mode=normal
 vesa=true
+cmdline="/bin/csh"
 EOF
 
 sudo tee /mnt/cubeos/system/config/debug.cfg > /dev/null << 'EOF'

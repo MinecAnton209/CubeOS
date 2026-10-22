@@ -155,6 +155,39 @@ impl Fat32 {
         let fat_start_lba = start_lba + reserved_sectors as u32;
         let data_start_lba = fat_start_lba + fat_size_sectors * num_fats as u32;
 
+        crate::serial::send_string("[FS] BPB: bytes_per_sector=");
+        let mut buf = [0u8; 20];
+        let mut n = bytes_per_sector as usize;
+        let mut i = 20;
+        while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+        crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+
+        crate::serial::send_string(", sectors_per_cluster=");
+        n = sectors_per_cluster as usize;
+        i = 20;
+        while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+        crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+
+        crate::serial::send_string(", root_cluster=");
+        n = root_cluster as usize;
+        i = 20;
+        while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+        crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+
+        crate::serial::send_string(", fat_start_lba=");
+        n = fat_start_lba as usize;
+        i = 20;
+        while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+        crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+
+        crate::serial::send_string(", data_start_lba=");
+        n = data_start_lba as usize;
+        i = 20;
+        while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+        crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+
+        crate::serial::send_string("\n");
+
         Some(Self {
             bpb: BpbFat32 {
                 bytes_per_sector,
@@ -164,8 +197,8 @@ impl Fat32 {
                 root_cluster,
                 fs_info_sector,
                 backup_boot_sector,
-                fat_start_lba,
-                data_start_lba,
+                fat_start_lba: reserved_sectors as u32,  // ← убрали partition_start
+                data_start_lba: reserved_sectors as u32 + fat_size_sectors * num_fats as u32,  // ← убрали partition_start
                 fat_size_sectors,
                 total_sectors,
             },
@@ -529,6 +562,7 @@ impl Fat32 {
         let mut result = [b' '; 11];
         let mut upper = [0u8; 64];
         let mut upper_len = 0;
+
         for b in name.bytes() {
             if upper_len < 64 {
                 upper[upper_len] = b.to_ascii_uppercase();
@@ -537,7 +571,6 @@ impl Fat32 {
         }
         let upper = &upper[..upper_len];
 
-        // Разделяем имя и расширение по точке
         let (name_part, ext_part) = if let Some(dot_pos) = upper.iter().position(|&b| b == b'.') {
             (&upper[..dot_pos], &upper[dot_pos + 1..])
         } else {

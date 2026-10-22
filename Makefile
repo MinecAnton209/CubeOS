@@ -36,6 +36,10 @@ $(KERNEL): boot.o ata.o $(LIB_PATH) linker.ld
 		--gc-sections -z max-page-size=0x1000
 	@echo "  Kernel linked: $(KERNEL)"
 
+# Сборка shell
+csh:
+	cd src/apps/csh && cargo +nightly build --release --target-dir ../../../target/apps
+
 # Создание ISO
 $(ISO): $(KERNEL)
 	@mkdir -p iso/boot/grub

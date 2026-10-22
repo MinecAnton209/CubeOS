@@ -81,15 +81,61 @@ impl FSManager {
     /// Читает файл по полному пути (например, "/system/config/boot.cfg")
     pub fn read_file(&self, ata: &AtaDrive, path: &str, buf: &mut [u8]) -> Option<usize> {
         let fat = self.fat32.as_ref()?;
+
+        // Отладка: выводим путь
+        crate::serial::send_string("[FS] Reading file: ");
+        crate::serial::send_string(path);
+        crate::serial::send_string("\n");
+
         let (dir_cluster, name83) = self.resolve_path(fat, ata, path)?;
+
+        // Отладка: выводим имя в формате 8.3
+        crate::serial::send_string("[FS] Looking for: ");
+        for b in &name83 {
+            if *b != b' ' {
+                crate::serial::send_byte(*b);
+            }
+        }
+        crate::serial::send_string("\n");
 
         let mut entries = [fat32::FatDirEntry::new(); 64];
         let count = fat.list_dir_entries(ata, dir_cluster, &mut entries);
-        for i in 0..count {
-            if entries[i].name == name83 && !entries[i].is_directory() {
-                return fat.read_file(ata, entries[i].cluster(), buf, entries[i].size);
+
+        // Отладка: выводим все записи в директории
+        crate::serial::send_string("[FS] Directory entries: ");
+        let mut count_buf = [0u8; 10];
+        let mut i = 10;
+        let mut n = count;
+        if n == 0 { count_buf[9] = b'0'; i = 9; }
+        else { while n > 0 { i -= 1; count_buf[i] = (n % 10) as u8 + b'0'; n /= 10; } }
+        crate::serial::send_string(core::str::from_utf8(&count_buf[i..]).unwrap_or("?"));
+        crate::serial::send_string("\n");
+
+        for j in 0..count {
+            crate::serial::send_string("  [");
+            let mut idx_buf = [0u8; 10];
+            let mut i = 10;
+            let mut n = j;
+            if n == 0 { idx_buf[9] = b'0'; i = 9; }
+            else { while n > 0 { i -= 1; idx_buf[i] = (n % 10) as u8 + b'0'; n /= 10; } }
+            crate::serial::send_string(core::str::from_utf8(&idx_buf[i..]).unwrap_or("?"));
+            crate::serial::send_string("] ");
+            for b in &entries[j].name {
+                if *b != b' ' {
+                    crate::serial::send_byte(*b);
+                }
+            }
+            crate::serial::send_string("\n");
+        }
+
+        for j in 0..count {
+            if entries[j].name == name83 && !entries[j].is_directory() {
+                crate::serial::send_string("[FS] File found! Reading...\n");
+                return fat.read_file(ata, entries[j].cluster(), buf, entries[j].size);
             }
         }
+
+        crate::serial::send_string("[FS] File not found in directory\n");
         None
     }
 
@@ -201,9 +247,7 @@ impl FSManager {
 
     /// Разрешает путь вида "/system/config/boot.cfg" до (dir_cluster, name83)
     fn resolve_path(&self, fat: &Fat32, ata: &AtaDrive, path: &str) -> Option<(u32, [u8; 11])> {
-        if !path.starts_with('/') {
-            return None;
-        }
+        if !path.starts_with('/') { return None; }
 
         let mut parts = ["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""];
         let mut part_count = 0;
@@ -213,30 +257,76 @@ impl FSManager {
                 part_count += 1;
             }
         }
-        if parts.is_empty() {
-            return None;
-        }
 
-        let file_name = parts.last()?;
+        if part_count == 0 { return None; }
+
+        let file_name = parts[part_count - 1];
         let name83 = Fat32::name_to_83(file_name)?;
 
+        // Отладка: выводим полное имя файла в 8.3 формате (с пробелами!)
+        crate::serial::send_string("[FS] Looking for file: ");
+        for b in &name83 {
+            crate::serial::send_byte(*b);  // Убрали проверку на пробел!
+        }
+        crate::serial::send_string("\n");
+
         let mut current = fat.bpb.root_cluster;
-        for part in &parts[..parts.len() - 1] {
-            if part.is_empty() {
-                continue;
-            }
+
+        for i in 0..part_count - 1 {
+            let part = parts[i];
+            if part.is_empty() { continue; }
             let dir_name83 = Fat32::name_to_83(part)?;
+
+            // Отладка: выводим имя директории в 8.3 формате
+            crate::serial::send_string("[FS] Looking for dir: ");
+            for b in &dir_name83 {
+                crate::serial::send_byte(*b);
+            }
+            crate::serial::send_string("\n");
+
+            // Отладка: выводим ВСЕ записи в текущей директории
+            crate::serial::send_string("[FS] Listing directory cluster ");
+            let mut buf = [0u8; 20];
+            let mut n = current as usize;
+            let mut idx = 20;
+            while n > 0 { idx -= 1; buf[idx] = (n % 10) as u8 + b'0'; n /= 10; }
+            crate::serial::send_string(core::str::from_utf8(&buf[idx..]).unwrap_or("?"));
+            crate::serial::send_string(":\n");
+
             let mut entries = [fat32::FatDirEntry::new(); 64];
             let count = fat.list_dir_entries(ata, current, &mut entries);
+
+            for j in 0..count {
+                crate::serial::send_string("  [");
+                let mut idx_buf = [0u8; 10];
+                let mut idx = 10;
+                let mut n = j;
+                if n == 0 { idx_buf[9] = b'0'; idx = 9; }
+                else { while n > 0 { idx -= 1; idx_buf[idx] = (n % 10) as u8 + b'0'; n /= 10; } }
+                crate::serial::send_string(core::str::from_utf8(&idx_buf[idx..]).unwrap_or("?"));
+                crate::serial::send_string("] ");
+
+                // Выводим имя записи ПОЛНОСТЬЮ (с пробелами!)
+                for b in &entries[j].name {
+                    crate::serial::send_byte(*b);
+                }
+
+                if entries[j].is_directory() {
+                    crate::serial::send_string(" [DIR]");
+                }
+                crate::serial::send_string("\n");
+            }
+
             let mut found = false;
-            for i in 0..count {
-                if entries[i].name == dir_name83 && entries[i].is_directory() {
-                    current = entries[i].cluster();
+            for j in 0..count {
+                if entries[j].name == dir_name83 && entries[j].is_directory() {
+                    current = entries[j].cluster();
                     found = true;
                     break;
                 }
             }
             if !found {
+                crate::serial::send_string("[FS] Directory not found!\n");
                 return None;
             }
         }

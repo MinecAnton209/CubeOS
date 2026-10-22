@@ -13,6 +13,8 @@ mod panic;
 mod fs;
 mod vesa_log;
 mod ata;
+mod elf;
+mod loader;
 
 use multiboot::MultibootInfo;
 use core::arch::asm;
@@ -255,11 +257,83 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     if ata.exists {
         log_both(&mut vesa_log, "OK", "ATA controller detected");
 
-        // TODO: полноценная инициализация через ata::AtaDrive
-        // TODO: монтирование FAT32 через fs::FSManager
-        // TODO: чтение /system/config/boot.cfg
-    } else {
-        log_both(&mut vesa_log, "WARN", "No ATA controller found");
+        // Инициализируем ATA-драйвер полностью
+        let mut ata = ata::AtaDrive::new();
+        ata.init();
+
+        if ata.exists {
+            log_both(&mut vesa_log, "OK", "ATA drive initialized");
+
+            // Монтируем FAT32 (второй раздел, индекс 1)
+            let mut fs = fs::FSManager::new();
+            if fs.mount_fat32(&ata, 1) {
+                log_both(&mut vesa_log, "OK", "FAT32 filesystem mounted");
+
+                // Читаем конфиг
+                let mut config_buf = [0u8; 512];
+                if let Some(size) = fs.read_file(&ata, "/SYSTEM/CONFIG/BOOT.CFG", &mut config_buf) {
+                    if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
+                        log_both(&mut vesa_log, "OK", "Boot config loaded");
+
+                        // Парсим конфиг и ищем cmdline
+                        let mut cmdline = None;
+                        let mut start = 0;
+
+                        for (i, &byte) in text.as_bytes().iter().enumerate() {
+                            if byte == b'\n' || byte == b'\r' || i == text.len() - 1 {
+                                let line_end = if i == text.len() - 1 { i + 1 } else { i };
+                                let line = &text[start..line_end];
+                                let line = line.trim();
+
+                                // Ищем строку cmdline = "..."
+                                if line.starts_with("cmdline") {
+                                    if let Some(eq_pos) = line.find('=') {
+                                        let value = line[eq_pos + 1..].trim();
+                                        let value = value.trim_matches('"');
+                                        if !value.is_empty() {
+                                            cmdline = Some(value);
+                                        }
+                                    }
+                                }
+
+                                // Выводим строку конфига
+                                if !line.is_empty() && !line.starts_with('#') {
+                                    log_both(&mut vesa_log, "CFG", line);
+                                }
+
+                                start = i + 1;
+                                if byte == b'\r' && i + 1 < text.len() && text.as_bytes()[i + 1] == b'\n' {
+                                    start = i + 2;
+                                }
+                            }
+                        }
+
+                        // Запускаем программу из cmdline
+                        if let Some(cmd) = cmdline {
+                            log_both(&mut vesa_log, "INFO", "Launching program from cmdline...");
+                            if loader::exec(&ata, &fs, cmd) {
+                                log_both(&mut vesa_log, "OK", "Program launched successfully");
+                            } else {
+                                log_both(&mut vesa_log, "ERROR", "Failed to launch program");
+                            }
+                        } else {
+                            log_both(&mut vesa_log, "INFO", "No cmdline in config, skipping program launch");
+                        }
+                    }
+                    if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
+                        for line in text.lines() {
+                            log_both(&mut vesa_log, "CFG", line);
+                        }
+                    }
+                } else {
+                    log_both(&mut vesa_log, "WARN", "boot.cfg not found");
+                }
+            } else {
+                log_both(&mut vesa_log, "ERROR", "Failed to mount FAT32");
+            }
+        } else {
+            log_both(&mut vesa_log, "WARN", "No ATA drive detected");
+        }
     }
 
     serial::send_string("\n[  OK ] CubeCORE v1.0 boot complete!\n");
@@ -268,6 +342,14 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     if let Some(ref mut logger) = vesa_log {
         logger.write_string("\n[  OK ] CubeCORE v1.0 boot complete!\n");
         logger.write_string("========================================\n\n");
+    }
+
+    // === ЭТАП 15: Загрузка /bin/csh ===
+    log_both(&mut vesa_log, "INFO", "Loading /bin/csh...");
+    if loader::exec(&ata, &fs, "/bin/csh") {
+        log_both(&mut vesa_log, "OK", "Shell launched");
+    } else {
+        log_both(&mut vesa_log, "WARN", "Failed to launch shell");
     }
 
     // Главный цикл

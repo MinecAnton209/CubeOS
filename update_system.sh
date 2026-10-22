@@ -36,6 +36,9 @@ sudo mount ${LOOP_DEV}p1 /mnt/boot
 sudo cp kernel.elf /mnt/boot/kernel.elf
 sudo umount /mnt/boot
 
+echo "Добавление пользовательских приложений..."
+sudo cp target/apps/x86_64-unknown-none/release/csh /mnt/cubeos/bin/csh
+
 # Размонтируем
 sudo umount /mnt/cubeos
 sudo losetup -d $LOOP_DEV
