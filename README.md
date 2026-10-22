@@ -1,0 +1,56 @@
+# CubeOS
+
+**CubeOS** is a 64-bit operating system written from scratch in Rust (with elements of Assembly and C). The project is created for learning low-level programming, OS architecture, and hardware interaction.
+
+[![Build Status](https://github.com/cubeweb-lab/CubeOS/actions/workflows/rust.yml/badge.svg)](https://github.com/cubeweb-lab/CubeOS/actions)
+[![Release - v1.0.0-dev-prealpha](https://img.shields.io/badge/Release-v1.0.0--dev--prealpha-2ea44f?logo=github)](https://github.com/cubeweb-lab/CubeOS/releases)
+[![License - GPLv3](https://img.shields.io/badge/License-GPLv3-orange?logo=github)](https://github.com/cubeweb-lab/CubeOS/blob/main/LICENSE)
+
+## Features (CubeCORE v1.0)
+*   **Boot:** Multiboot2 via GRUB2.
+*   **Architecture:** x86_64, Long Mode.
+*   **Memory:** Physical Memory Manager (PMM), Multiboot2 memory map parsing.
+*   **Interrupts:** IDT, PIC remapping (IRQ 0-15), PS/2 keyboard support.
+*   **Graphics:** VESA Framebuffer support, custom logger to screen and serial port (COM1).
+*   **Drivers:** ATA PIO driver for HDD operations.
+*   **File System:** Custom FAT32 driver (in development).
+
+## Build Requirements
+To build CubeOS from source, you need a Linux environment (preferably Debian/Ubuntu or Arch) and the following set of tools:
+*   `rustc` and `cargo` (Nightly toolchain)
+*   `nasm`
+*   `gcc`
+*   `ld.lld` (LLVM linker)
+*   `grub-mkrescue` (for creating ISO)
+*   `xorriso`, `mtools`, `qemu-system-x86_64`
+
+## Build and Run
+```bash
+# Clone the repository
+git clone https://github.com/cubeweb-lab/CubeOS.git
+cd CubeOS
+
+# Build the kernel
+make
+
+# Create a bootable ISO
+make cubeos.iso
+# OR create an HDD image
+bash create_hdd.sh
+bash update_system.sh
+
+# 4. Run in QEMU
+make run
+```
+
+Contributing
+
+We welcome Pull Requests! If you want to make major changes, please create an Issue first to discuss them. Check out our issues.
+
+License
+
+This project is distributed under the GPL-3.0 License. See the LICENSE file for details.
+
+Russian Documentation
+
+Read the Russian documentation here: README_RU_ru.md
