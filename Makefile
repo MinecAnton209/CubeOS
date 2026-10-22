@@ -5,12 +5,13 @@ HDD = cubeos.img
 CC = gcc
 CARGO = cargo +nightly
 NASM = nasm
-LD = ld.lld
+LD = ld
+ 
 
 # Путь к библиотеке — в корне проекта в target/
 LIB_PATH = target/$(TARGET)/release/libcube_core.a
 
-.PHONY: all clean run hdd update-system run-hdd
+.PHONY: all clean run hdd update-system run-hdd FORCE
 
 all: $(KERNEL)
 
@@ -19,12 +20,13 @@ boot.o: src/cube_core/boot.asm
 	$(NASM) -f elf64 $< -o $@
 
 ata.o: src/cube_core/ata.c
-	gcc -ffreestanding -mno-red-zone -m64 -c src/cube_core/ata.c -o ata.o
+	gcc -ffreestanding -mno-red-zone -m64 -fno-stack-protector -c src/cube_core/ata.c -o ata.o
 
 # Компиляция ядра (cargo запускается из src/cube_core, но target/ создаётся в корне)
 $(LIB_PATH): FORCE
 	cd src/cube_core && RUSTFLAGS="-C link-arg=-nostdlib -C relocation-model=static -C code-model=kernel" \
-		$(CARGO) build --release --target-dir ../../target
+		$(CARGO) build -Z build-std=core,compiler_builtins -Z build-std-features=compiler-builtins-mem \
+		--target $(TARGET) --release --target-dir ../../target
 
 FORCE:
 
