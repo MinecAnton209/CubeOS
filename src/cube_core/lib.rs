@@ -15,6 +15,9 @@ mod vesa_log;
 mod ata;
 mod elf;
 mod loader;
+mod tss;
+mod ring3;
+mod syscall;
 
 use multiboot::MultibootInfo;
 use core::arch::asm;
@@ -352,21 +355,21 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
         log_both(&mut vesa_log, "WARN", "Failed to launch shell");
     }
 
-    // Главный цикл
+    // Если exec вернулся (не должен), уходим в главный цикл
+    kernel_main_loop()
+}
+
+#[no_mangle]
+pub extern "C" fn kernel_main_loop() -> ! {
+    crate::serial::send_string("\n[KERNEL] Back in main loop after user exit\n");
     loop {
         if let Some(sc) = interrupts::keyboard_pop() {
-            serial::send_string("[INPUT] Scancode: 0x");
-            let mut hex_buf = [0u8; 2];
-            hex_buf[0] = if (sc >> 4) < 10 { b'0' + (sc >> 4) } else { b'A' + (sc >> 4) - 10 };
-            hex_buf[1] = if (sc & 0xF) < 10 { b'0' + (sc & 0xF) } else { b'A' + (sc & 0xF) - 10 };
-            serial::send_string(core::str::from_utf8(&hex_buf).unwrap());
-            serial::send_string("\n");
-
-            if let Some(ref mut logger) = vesa_log {
-                logger.write_string("[INPUT] Scancode: 0x");
-                logger.write_string(core::str::from_utf8(&hex_buf).unwrap());
-                logger.write_string("\n");
-            }
+            crate::serial::send_string("[INPUT] scancode=0x");
+            let mut h = [0u8; 2];
+            h[0] = if (sc >> 4) < 10 { b'0' + (sc >> 4) } else { b'A' + (sc >> 4) - 10 };
+            h[1] = if (sc & 0xF) < 10 { b'0' + (sc & 0xF) } else { b'A' + (sc & 0xF) - 10 };
+            crate::serial::send_string(core::str::from_utf8(&h).unwrap_or("?"));
+            crate::serial::send_string("\n");
         }
         unsafe { core::arch::asm!("hlt") }
     }

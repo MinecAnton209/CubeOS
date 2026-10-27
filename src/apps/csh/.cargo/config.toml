@@ -1,5 +1,14 @@
 [build]
 target = "x86_64-unknown-none"
+rustflags = [
+    "-C", "link-arg=-Tlinker.ld",
+    "-C", "link-arg=-no-pie",
+    "-C", "relocation-model=static",
+    "-C", "no-vectorize-loops",
+    "-C", "target-feature=-sse,-sse2,-avx,-avx2",
+    "-C", "link-arg=-nostdlib",
+    "-C", "code-model=kernel"
+]
 
 [unstable]
 build-std = ["core", "compiler_builtins"]

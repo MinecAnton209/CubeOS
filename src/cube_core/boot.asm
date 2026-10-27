@@ -1,3 +1,6 @@
+; ============================================
+; Multiboot2 Header
+; ============================================
 section .multiboot
 align 8
 multiboot_header:
@@ -20,6 +23,9 @@ multiboot_header:
     dd 8
 multiboot_header_end:
 
+; ============================================
+; Boot Code (32-bit)
+; ============================================
 section .boot
 bits 32
 global start
@@ -41,6 +47,7 @@ start:
     mov dword [0x500], eax
     mov dword [0x504], ebx
 
+    ; Проверка Long Mode
     mov eax, 0x80000000
     cpuid
     cmp eax, 0x80000001
@@ -55,20 +62,22 @@ start:
     call init_gdt64
     lgdt [gdt64_ptr]
 
-    ; Загружаем TR в 32-битном режиме
-    mov ax, 0x18
+    ; Загружаем TSS (дескриптор уже валиден)
+    mov ax, 0x28
     ltr ax
 
+    ; Включаем paging
     mov eax, PML4_TABLE_ADDR
     mov cr3, eax
 
     mov eax, cr4
-    or eax, 0x20
+    or eax, 0x20      ; PAE
     mov cr4, eax
 
+    ; Включаем Long Mode
     mov ecx, 0xC0000080
     rdmsr
-    or eax, 0x100
+    or eax, 0x100     ; LME
     wrmsr
 
     mov eax, cr0
@@ -82,6 +91,9 @@ start:
     hlt
     jmp $
 
+; ============================================
+; Инициализация Paging
+; ============================================
 init_paging:
     pushad
     mov edi, PML4_TABLE_ADDR
@@ -90,23 +102,23 @@ init_paging:
     rep stosd
 
     mov eax, PDPT_TABLE_ADDR
-    or eax, 0x03
+    or eax, 0x07
     mov [PML4_TABLE_ADDR], eax
 
     mov eax, PDT_TABLE_ADDR
-    or eax, 0x03
+    or eax, 0x07
     mov [PDPT_TABLE_ADDR], eax
 
     mov eax, PDT1_TABLE_ADDR
-    or eax, 0x03
+    or eax, 0x07
     mov [PDPT_TABLE_ADDR + 8], eax
 
     mov eax, PDT2_TABLE_ADDR
-    or eax, 0x03
+    or eax, 0x07
     mov [PDPT_TABLE_ADDR + 16], eax
 
     mov eax, PDT3_TABLE_ADDR
-    or eax, 0x03
+    or eax, 0x07
     mov [PDPT_TABLE_ADDR + 24], eax
 
     %macro fill_pdt 2
@@ -115,48 +127,74 @@ init_paging:
         mov ecx, 512
     %%loop:
         mov [edi], ebx
+        mov dword [edi + 4], 0
         add ebx, 0x200000
         add edi, 8
         loop %%loop
     %endmacro
 
-    fill_pdt PDT_TABLE_ADDR,  0x00000083
-    fill_pdt PDT1_TABLE_ADDR, 0x40000083
-    fill_pdt PDT2_TABLE_ADDR, 0x80000083
-    fill_pdt PDT3_TABLE_ADDR, 0xC0000083
+    ; 0x87 = Present + Writable + User + Page Size 2MB
+    fill_pdt PDT_TABLE_ADDR,  0x00000087
+    fill_pdt PDT1_TABLE_ADDR, 0x40000087
+    fill_pdt PDT2_TABLE_ADDR, 0x80000087
+    fill_pdt PDT3_TABLE_ADDR, 0xC0000087
 
     popad
     ret
 
+; ============================================
+; Инициализация GDT64 (с поддержкой Ring 3)
+; ============================================
 init_gdt64:
     pushad
+
     mov edi, GDT64_ADDR
-    mov ecx, (104 + 40) / 4
+    mov ecx, 30
     xor eax, eax
     rep stosd
 
+    ; [0x00] Null
+    ; [0x08] Kernel Code (Ring 0)
     mov dword [GDT64_ADDR + 8], 0x0000FFFF
     mov dword [GDT64_ADDR + 12], 0x00209A00
 
+    ; [0x10] Kernel Data (Ring 0)
     mov dword [GDT64_ADDR + 16], 0x0000FFFF
     mov dword [GDT64_ADDR + 20], 0x00209200
 
-    ; TSS
-    mov eax, GDT64_ADDR + 40
-    mov word [GDT64_ADDR + 24], 103
-    mov word [GDT64_ADDR + 26], ax
-    shr eax, 16
-    mov byte [GDT64_ADDR + 28], al
-    mov byte [GDT64_ADDR + 29], 0x89
-    mov byte [GDT64_ADDR + 30], 0x00
-    mov byte [GDT64_ADDR + 31], ah
-    mov dword [GDT64_ADDR + 32], 0
+    ; [0x18] User Code (Ring 3)
+    mov dword [GDT64_ADDR + 24], 0x0000FFFF
+    mov dword [GDT64_ADDR + 28], 0x0020FA00
 
-    mov word [gdt64_ptr], (4 * 8 - 1)
+    ; [0x20] User Data (Ring 3)
+    mov dword [GDT64_ADDR + 32], 0x0000FFFF
+    mov dword [GDT64_ADDR + 36], 0x0020F200
+
+    ; [0x28] TSS (16 байт для 64-битного режима)
+    ; ВАЖНО: base указывает на валидный TSS в .bss (заполним в tss.rs)
+    ; Здесь ставим base = GDT64_ADDR + 56 (временный), rsp0=0 — обновится в tss.rs
+    mov eax, GDT64_ADDR + 56
+    mov word [GDT64_ADDR + 40], 103
+    mov word [GDT64_ADDR + 42], ax
+    shr eax, 16
+    mov byte [GDT64_ADDR + 44], al
+    mov byte [GDT64_ADDR + 45], 0x89
+    mov byte [GDT64_ADDR + 46], 0x00
+    mov byte [GDT64_ADDR + 47], ah
+    mov dword [GDT64_ADDR + 48], eax
+    mov dword [GDT64_ADDR + 52], 0
+
+    ; GDT pointer
+    mov word [gdt64_ptr], (8 * 8 - 1)
     mov dword [gdt64_ptr + 2], GDT64_ADDR
+    mov dword [gdt64_ptr + 6], 0
+
     popad
     ret
 
+; ============================================
+; Long Mode (64-bit)
+; ============================================
 bits 64
 long_mode_start:
     mov ax, 0x10
@@ -167,27 +205,21 @@ long_mode_start:
     mov ss, ax
 
     mov rsp, _kernel_end
-    add rsp, 0x2000
+    add rsp, 0x3F000      ; в зазоре после .bss/.program_buf/.kernel_stack
     and rsp, ~0xF
-
-    ; Заполняем TSS и IOPB
-    mov rdi, 0x13028
-    mov ecx, 26
-    xor eax, eax
-    rep stosd
-    mov word [0x13028 + 102], 104
-    mov byte [0x13028 + 104], 0xFF
 
     mov edi, dword [0x500]
     mov esi, dword [0x504]
-
     call rust_main
-
     cli
     hlt
     jmp $
 
+; ============================================
+; Данные
+; ============================================
 section .data
+align 8
 gdt64_ptr:
     dw 0
-    dd 0
+    dq 0

@@ -1,134 +1,151 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
+use cube_syscall::*;
 
-// Простой вывод в Serial (COM1)
-fn serial_out(byte: u8) {
-    unsafe { asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte) };
+const MAX_LINE: usize = 256;
+
+fn print(s: &[u8]) { write(STDOUT, s); }
+fn eprint(s: &[u8]) { write(STDERR, s); }
+
+fn read_line(buf: &mut [u8]) -> usize {
+    let n = read(STDIN, buf);
+    if n <= 0 { return 0; }
+    let mut len = n as usize;
+    while len > 0 && (buf[len - 1] == b'\n' || buf[len - 1] == b'\r') { len -= 1; }
+    len
 }
 
-fn serial_print(s: &str) {
-    for byte in s.bytes() {
-        if byte == b'\n' {
-            serial_out(b'\r');
+fn cmd_ls(args: &[u8]) {
+    let path: &[u8] = if args.is_empty() { b"." } else { args };
+    let fd = open(path, O_RDONLY | O_DIRECTORY);
+    if fd < 0 { eprint(b"ls: cannot open\n"); return; }
+
+    let mut buf = [0u8; 1024];
+    let n = getdents(fd as usize, &mut buf);
+    close(fd as usize);
+    if n < 0 { eprint(b"ls: getdents failed\n"); return; }
+
+    let total = n as usize;
+    let mut off = 0usize;
+    while off + 19 <= total {
+        let reclen = u16::from_le_bytes([buf[off + 16], buf[off + 17]]) as usize;
+        if reclen == 0 { break; }
+        let ftype = buf[off + 18];
+        let mut name_len = 0;
+        while off + 19 + name_len < total && buf[off + 19 + name_len] != 0 {
+            name_len += 1;
         }
-        serial_out(byte);
+        let name = &buf[off + 19..off + 19 + name_len];
+        if name != b"." && name != b".." {
+            print(name);
+            if ftype == DT_DIR { print(b"/"); }
+            print(b"\n");
+        }
+        off += reclen;
     }
 }
 
-// Чтение символа с клавиатуры (через порт 0x60)
-fn keyboard_read() -> u8 {
-    let sc: u8;
-    unsafe { asm!("in al, 0x60", out("al") sc) };
-    sc
+fn cmd_cd(args: &[u8]) {
+    let path: &[u8] = if args.is_empty() { b"/" } else { args };
+    if chdir(path) < 0 { eprint(b"cd: no such directory\n"); }
 }
 
-// Простая таблица сканкодов → ASCII (только буквы и цифры)
-fn scancode_to_ascii(sc: u8) -> Option<u8> {
-    match sc {
-        0x02 => Some(b'1'), 0x03 => Some(b'2'), 0x04 => Some(b'3'),
-        0x05 => Some(b'4'), 0x06 => Some(b'5'), 0x07 => Some(b'6'),
-        0x08 => Some(b'7'), 0x09 => Some(b'8'), 0x0A => Some(b'9'),
-        0x0B => Some(b'0'),
-        0x10 => Some(b'q'), 0x11 => Some(b'w'), 0x12 => Some(b'e'),
-        0x13 => Some(b'r'), 0x14 => Some(b't'), 0x15 => Some(b'y'),
-        0x16 => Some(b'u'), 0x17 => Some(b'i'), 0x18 => Some(b'o'),
-        0x19 => Some(b'p'),
-        0x1E => Some(b'a'), 0x1F => Some(b's'), 0x20 => Some(b'd'),
-        0x21 => Some(b'f'), 0x22 => Some(b'g'), 0x23 => Some(b'h'),
-        0x24 => Some(b'j'), 0x25 => Some(b'k'), 0x26 => Some(b'l'),
-        0x2C => Some(b'z'), 0x2D => Some(b'x'), 0x2E => Some(b'c'),
-        0x2F => Some(b'v'), 0x30 => Some(b'b'), 0x31 => Some(b'n'),
-        0x32 => Some(b'm'),
-        0x1C => Some(b'\n'),  // Enter
-        0x0E => Some(b'\x08'), // Backspace
-        0x39 => Some(b' '),    // Space
-        _ => None,
+fn cmd_pwd(_args: &[u8]) {
+    let mut buf = [0u8; 256];
+    let n = getcwd(&mut buf);
+    if n > 0 {
+        print(&buf[..n as usize]);
+        print(b"\n");
     }
+}
+
+fn cmd_cat(args: &[u8]) {
+    if args.is_empty() { eprint(b"cat: missing argument\n"); return; }
+    let fd = open(args, O_RDONLY);
+    if fd < 0 { eprint(b"cat: cannot open\n"); return; }
+    let mut buf = [0u8; 512];
+    loop {
+        let n = read(fd as usize, &mut buf);
+        if n <= 0 { break; }
+        write(STDOUT, &buf[..n as usize]);
+    }
+    close(fd as usize);
+}
+
+fn cmd_mkdir(args: &[u8]) {
+    if args.is_empty() { eprint(b"mkdir: missing argument\n"); return; }
+    if mkdir(args, 0o755) < 0 { eprint(b"mkdir: failed\n"); }
+}
+
+fn cmd_rm(args: &[u8]) {
+    if args.is_empty() { eprint(b"rm: missing argument\n"); return; }
+    if unlink(args) < 0 { eprint(b"rm: failed\n"); }
+}
+
+fn cmd_echo(args: &[u8]) {
+    print(args);
+    print(b"\n");
+}
+
+fn cmd_help(_args: &[u8]) {
+    print(b"Commands:\n");
+    print(b"  ls [path]     list directory\n");
+    print(b"  cd [path]     change directory\n");
+    print(b"  pwd           print working directory\n");
+    print(b"  cat <file>    print file contents\n");
+    print(b"  mkdir <path>  create directory\n");
+    print(b"  rm <path>     remove file\n");
+    print(b"  echo <text>   print text\n");
+    print(b"  help          this message\n");
+    print(b"  exit          quit shell\n");
 }
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    serial_print("\n");
-    serial_print("========================================\n");
-    serial_print("  CubeOS Shell v0.1 (csh)\n");
-    serial_print("========================================\n");
-    serial_print("Type 'help' for commands, 'exit' to quit\n\n");
+    print(b"CubeOS Shell v0.1\n");
+    print(b"Type 'help' for commands.\n\n");
 
-    let mut cmd_buf = [0u8; 256];
-    let mut cmd_len = 0;
-
+    let mut line = [0u8; MAX_LINE];
     loop {
-        // Выводим приглашение
-        serial_print("root@cubeos # ");
+        let mut cwd = [0u8; 256];
+        let cn = getcwd(&mut cwd);
+        if cn > 0 { print(&cwd[..cn as usize]); }
+        print(b"$ ");
 
-        // Читаем команду
-        cmd_len = 0;
-        loop {
-            let sc = keyboard_read();
+        let len = read_line(&mut line);
+        if len == 0 { continue; }
 
-            // Игнорируем отпускание клавиш
-            if sc & 0x80 != 0 {
-                continue;
-            }
-
-            if let Some(ch) = scancode_to_ascii(sc) {
-                if ch == b'\n' {
-                    serial_out(b'\n');
-                    break;
-                } else if ch == b'\x08' {
-                    // Backspace
-                    if cmd_len > 0 {
-                        cmd_len -= 1;
-                        serial_print("\x08 \x08");
-                    }
-                } else if cmd_len < 255 {
-                    cmd_buf[cmd_len] = ch;
-                    cmd_len += 1;
-                    serial_out(ch);
-                }
-            }
-        }
-
-        // Парсим команду
-        let cmd = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
-        let cmd = cmd.trim();
+        let mut i = 0;
+        while i < len && line[i] == b' ' { i += 1; }
+        let cmd_start = i;
+        while i < len && line[i] != b' ' { i += 1; }
+        let cmd = &line[cmd_start..i];
+        while i < len && line[i] == b' ' { i += 1; }
+        let args = &line[i..len];
 
         match cmd {
-            "help" => {
-                serial_print("Available commands:\n");
-                serial_print("  help    - show this help\n");
-                serial_print("  echo    - print text\n");
-                serial_print("  clear   - clear screen\n");
-                serial_print("  exit    - exit shell\n");
-                serial_print("\n");
-            }
-            "clear" => {
-                // Очищаем экран через ANSI (работает в Serial)
-                serial_print("\x1B[2J\x1B[H");
-            }
-            "exit" => {
-                serial_print("Goodbye!\n");
-                loop { unsafe { asm!("cli; hlt") } }
-            }
-            _ if cmd.starts_with("echo ") => {
-                let text = &cmd[5..];
-                serial_print(text);
-                serial_print("\n");
-            }
-            "" => {}
+            b"ls"    => cmd_ls(args),
+            b"cd"    => cmd_cd(args),
+            b"pwd"   => cmd_pwd(args),
+            b"cat"   => cmd_cat(args),
+            b"mkdir" => cmd_mkdir(args),
+            b"rm"    => cmd_rm(args),
+            b"echo"  => cmd_echo(args),
+            b"help"  => cmd_help(args),
+            b"exit"  => { print(b"bye\n"); exit(0); }
+            b""      => {}
             _ => {
-                serial_print("Unknown command: ");
-                serial_print(cmd);
-                serial_print("\n");
+                eprint(b"unknown command: ");
+                eprint(cmd);
+                eprint(b"\n");
             }
         }
     }
 }
 
 #[panic_handler]
-fn panic(_info: &core::panic::PanicInfo) -> ! {
-    serial_print("\n[CSH] PANIC!\n");
-    loop { unsafe { asm!("cli; hlt") } }
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    eprint(b"[csh] panic\n");
+    loop {}
 }
