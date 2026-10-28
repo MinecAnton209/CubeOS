@@ -102,23 +102,23 @@ init_paging:
     rep stosd
 
     mov eax, PDPT_TABLE_ADDR
-    or eax, 0x07
+    or eax, 0x03
     mov [PML4_TABLE_ADDR], eax
 
     mov eax, PDT_TABLE_ADDR
-    or eax, 0x07
+    or eax, 0x03
     mov [PDPT_TABLE_ADDR], eax
 
     mov eax, PDT1_TABLE_ADDR
-    or eax, 0x07
+    or eax, 0x03
     mov [PDPT_TABLE_ADDR + 8], eax
 
     mov eax, PDT2_TABLE_ADDR
-    or eax, 0x07
+    or eax, 0x03
     mov [PDPT_TABLE_ADDR + 16], eax
 
     mov eax, PDT3_TABLE_ADDR
-    or eax, 0x07
+    or eax, 0x03
     mov [PDPT_TABLE_ADDR + 24], eax
 
     %macro fill_pdt 2
@@ -133,11 +133,11 @@ init_paging:
         loop %%loop
     %endmacro
 
-    ; 0x87 = Present + Writable + User + Page Size 2MB
-    fill_pdt PDT_TABLE_ADDR,  0x00000087
-    fill_pdt PDT1_TABLE_ADDR, 0x40000087
-    fill_pdt PDT2_TABLE_ADDR, 0x80000087
-    fill_pdt PDT3_TABLE_ADDR, 0xC0000087
+    ; 0x83 = Present + Writable + Page Size 2MB, supervisor-only; user pages are mapped per process by vmm.rs
+    fill_pdt PDT_TABLE_ADDR,  0x00000083
+    fill_pdt PDT1_TABLE_ADDR, 0x40000083
+    fill_pdt PDT2_TABLE_ADDR, 0x80000083
+    fill_pdt PDT3_TABLE_ADDR, 0xC0000083
 
     popad
     ret

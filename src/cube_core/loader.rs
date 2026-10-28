@@ -2,6 +2,7 @@
 use crate::elf;
 use crate::fs::FSManager;
 use crate::ata::AtaDrive;
+use crate::vmm::{self, AddressSpace};
 
 static mut PROGRAM_BUF: [u8; 65536] = [0; 65536];
 
@@ -53,10 +54,19 @@ pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
 
         crate::serial::send_string("[LOADER] Valid ELF detected\n");
 
-        let program = match elf::load_elf(&PROGRAM_BUF[..size]) {
+        let mut space = match AddressSpace::new() {
+            Some(s) => s,
+            None => {
+                crate::serial::send_string("[LOADER] ERROR: out of memory for address space\n");
+                return false;
+            }
+        };
+
+        let program = match elf::load_elf(&PROGRAM_BUF[..size], &mut space) {
             Some(p) => p,
             None => {
                 crate::serial::send_string("[LOADER] ERROR: ELF load failed\n");
+                space.destroy();
                 return false;
             }
         };
@@ -74,7 +84,11 @@ pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
 
         crate::vesa_log::console_reset();
         let entry: extern "C" fn(*const KernelApi) = core::mem::transmute(program.entry_point);
+        space.activate();
         entry(&KERNEL_API);
+
+        vmm::load_cr3(vmm::kernel_cr3());
+        space.destroy();
     }
 
     false

@@ -1,5 +1,6 @@
 use checks_host::checks::{
-    cluster_in_range, config_cmdline, elf_segment_fits, fat_layout, in_segment, mmap_entry_count, range_fits,
+    cluster_in_range, config_cmdline, elf_segment_fits, fat_layout, in_segment, mmap_entry_count, page_span,
+    page_table_index, range_fits,
 };
 
 #[test]
@@ -131,4 +132,39 @@ fn config_cmdline_ignores_empty_values_and_missing_keys() {
 #[test]
 fn config_cmdline_last_non_empty_assignment_wins() {
     assert_eq!(config_cmdline("cmdline=/bin/a\ncmdline=/bin/b\n"), Some("/bin/b"));
+}
+
+#[test]
+fn page_table_index_extracts_each_9_bit_level() {
+    let virt = (1u64 << 39) | (3u64 << 30) | (5u64 << 21) | (7u64 << 12) | 0x123;
+    assert_eq!(page_table_index(virt, 4), 1);
+    assert_eq!(page_table_index(virt, 3), 3);
+    assert_eq!(page_table_index(virt, 2), 5);
+    assert_eq!(page_table_index(virt, 1), 7);
+}
+
+#[test]
+fn page_table_index_ignores_bits_above_the_48_bit_address_space() {
+    assert_eq!(page_table_index(1u64 << 48, 4), 0);
+}
+
+#[test]
+fn page_span_rounds_both_ends_to_page_boundaries() {
+    assert_eq!(page_span(0x1234, 0x10), Some((0x1000, 0x2000)));
+    assert_eq!(page_span(0x1FFF, 2), Some((0x1000, 0x3000)));
+}
+
+#[test]
+fn page_span_exact_page_is_a_single_page() {
+    assert_eq!(page_span(0x1000, 0x1000), Some((0x1000, 0x2000)));
+}
+
+#[test]
+fn page_span_zero_length_is_empty() {
+    assert_eq!(page_span(0x1000, 0), Some((0x1000, 0x1000)));
+}
+
+#[test]
+fn page_span_rejects_end_overflow() {
+    assert_eq!(page_span(u64::MAX - 1, 4), None);
 }

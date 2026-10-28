@@ -1,6 +1,7 @@
 // src/cube_core/elf.rs
 use core::mem::size_of;
-use crate::checks;
+use crate::checks::{self, PAGE_SIZE};
+use crate::vmm::{AddressSpace, USER_BASE, USER_LIMIT};
 
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 pub const PT_LOAD: u32 = 1;
@@ -9,14 +10,6 @@ pub const PT_LOAD: u32 = 1;
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
-
-// Linker-provided end of the kernel image, including its stack region.
-extern "C" {
-    static _kernel_end: u8;
-}
-
-// boot.asm identity-maps the first 4 GiB, so user segments must stay below this address.
-const LOAD_REGION_END: u64 = 0x1_0000_0000;
 
 // ELF64 заголовок
 #[repr(C)]
@@ -56,10 +49,6 @@ pub struct LoadedProgram {
     pub size: u64,
 }
 
-fn kernel_end() -> u64 {
-    unsafe { &_kernel_end as *const u8 as u64 }
-}
-
 fn read_phdr(data: &[u8], header: &Elf64Header, idx: usize) -> Option<Elf64Phdr> {
     let offset = header.e_phoff.checked_add(idx as u64 * header.e_phentsize as u64)?;
     if !checks::range_fits(offset, size_of::<Elf64Phdr>() as u64, data.len() as u64) {
@@ -69,9 +58,9 @@ fn read_phdr(data: &[u8], header: &Elf64Header, idx: usize) -> Option<Elf64Phdr>
     Some(unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset as usize) as *const Elf64Phdr) })
 }
 
-/// Загружает ELF-файл из буфера в память
+/// Загружает ELF-файл в адресное пространство процесса
 /// Возвращает точку входа и базовый адрес
-pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
+pub fn load_elf(data: &[u8], space: &mut AddressSpace) -> Option<LoadedProgram> {
     if data.len() < size_of::<Elf64Header>() {
         return None;
     }
@@ -87,7 +76,6 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
         return None;
     }
 
-    let region_start = kernel_end();
     let file_len = data.len() as u64;
 
     // Validate every segment and the entry point before writing any memory,
@@ -108,8 +96,8 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
             phdr.p_filesz,
             phdr.p_memsz,
             file_len,
-            region_start,
-            LOAD_REGION_END,
+            USER_BASE,
+            USER_LIMIT,
         ) {
             crate::serial::send_string("[ELF] Segment rejected: outside load region or malformed\n");
             return None;
@@ -139,15 +127,26 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
             continue;
         }
 
-        unsafe {
-            let dst = phdr.p_vaddr as *mut u8;
-            let src = data.as_ptr().add(phdr.p_offset as usize);
-            core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+        let (first, end) = checks::page_span(phdr.p_vaddr, phdr.p_memsz)?;
+        let file_end = phdr.p_vaddr + phdr.p_filesz;
+        let writable = phdr.p_flags & PF_W != 0;
 
-            if phdr.p_memsz > phdr.p_filesz {
-                let bss_start = dst.add(phdr.p_filesz as usize);
-                core::ptr::write_bytes(bss_start, 0, (phdr.p_memsz - phdr.p_filesz) as usize);
+        let mut page = first;
+        while page < end {
+            // Segments can share a page; reuse the frame an earlier segment already mapped.
+            let frame = match space.translate(page) {
+                Some(frame) => frame,
+                None => space.map_user_zeroed(page, writable)?,
+            };
+
+            let copy_start = page.max(phdr.p_vaddr);
+            let copy_end = (page + PAGE_SIZE).min(file_end);
+            if copy_start < copy_end {
+                let src = data.as_ptr().wrapping_add((phdr.p_offset + (copy_start - phdr.p_vaddr)) as usize);
+                let dst = (frame + (copy_start - page)) as *mut u8;
+                unsafe { core::ptr::copy_nonoverlapping(src, dst, (copy_end - copy_start) as usize) };
             }
+            page += PAGE_SIZE;
         }
     }
 

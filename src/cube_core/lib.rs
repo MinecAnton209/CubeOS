@@ -21,6 +21,7 @@ mod tss;
 mod ring3;
 mod syscall;
 mod sched;
+mod vmm;
 
 use multiboot::MultibootInfo;
 use core::arch::asm;
@@ -207,6 +208,9 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     serial::send_string(write_num(&mut buf, memory::free_memory_mb() as usize));
     serial::send_string(" MB)\n");
     serial::log_ok("Physical Memory Manager initialized");
+
+    vmm::init();
+    serial::log_ok("Virtual memory manager initialized");
 
     // 9. IDT
     unsafe { idt::init_idt(); }

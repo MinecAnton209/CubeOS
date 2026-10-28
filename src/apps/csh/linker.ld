@@ -1,7 +1,7 @@
 ENTRY(_start)
 
 SECTIONS {
-    . = 0x1000000;
+    . = 0x8000000000;
 
     .text ALIGN(4K) : {
         *(.text .text.*)

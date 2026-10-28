@@ -16,10 +16,11 @@ pub struct Task {
     pub pid: u64,
     pub stack_base: u64,
     pub stack_pages: usize,
+    pub cr3: u64,
 }
 
 const FREE_TASK: Task = Task {
-    rsp: 0, state: State::Free, pid: 0, stack_base: 0, stack_pages: 0,
+    rsp: 0, state: State::Free, pid: 0, stack_base: 0, stack_pages: 0, cr3: 0,
 };
 
 static mut TASKS: [Task; MAX_TASKS] = [FREE_TASK; MAX_TASKS];
@@ -30,6 +31,7 @@ pub fn init() {
     unsafe {
         TASKS[0] = Task {
             rsp: 0, state: State::Running, pid: 0, stack_base: 0, stack_pages: 0,
+            cr3: crate::vmm::kernel_cr3(),
         };
     }
     CURRENT.store(0, Ordering::Relaxed);
@@ -57,6 +59,7 @@ pub fn tick() {
         }
         TASKS[next].state = State::Running;
         CURRENT.store(next, Ordering::Relaxed);
+        crate::vmm::load_cr3(TASKS[next].cr3);
         context_switch(&mut TASKS[cur].rsp, TASKS[next].rsp);
     }
 }
@@ -97,6 +100,7 @@ pub fn spawn(entry: extern "C" fn() -> !, stack_base: u64, stack_pages: usize) -
                     pid,
                     stack_base,
                     stack_pages,
+                    cr3: crate::vmm::kernel_cr3(),
                 };
                 return Some(pid);
             }

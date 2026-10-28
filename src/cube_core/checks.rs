@@ -102,3 +102,22 @@ pub fn config_cmdline(text: &str) -> Option<&str> {
     }
     cmdline
 }
+
+pub const PAGE_SIZE: u64 = 4096;
+pub const PTE_PRESENT: u64 = 1 << 0;
+pub const PTE_WRITABLE: u64 = 1 << 1;
+pub const PTE_USER: u64 = 1 << 2;
+pub const PTE_ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
+
+// Level 4 is the PML4; each level indexes 512 entries of 8 bytes.
+pub fn page_table_index(virt: u64, level: u32) -> usize {
+    ((virt >> (12 + 9 * (level - 1))) & 0x1FF) as usize
+}
+
+// Returns the page-aligned [first, end) range that covers `len` bytes starting at `start`.
+pub fn page_span(start: u64, len: u64) -> Option<(u64, u64)> {
+    let end = start.checked_add(len)?;
+    let first = start & !(PAGE_SIZE - 1);
+    let last = end.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
+    Some((first, last))
+}
