@@ -56,31 +56,53 @@ impl VesaLogger {
 
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
-            match byte {
-                b'\n' => {
-                    self.x = 0;
-                    self.y += font::FONT_HEIGHT;
-                }
-                b'\r' => {
-                    self.x = 0;
-                }
-                _ => {
-                    self.draw_char(self.x, self.y, byte);
-                    self.x += font::FONT_WIDTH;
-                }
-            }
+            self.write_byte(byte);
+        }
+    }
 
-            // Перенос строки
-            if self.x + font::FONT_WIDTH > self.width {
+    pub fn write_byte(&mut self, byte: u8) {
+        match byte {
+            b'\n' => {
                 self.x = 0;
                 self.y += font::FONT_HEIGHT;
             }
-
-            // Скроллинг
-            if self.y + font::FONT_HEIGHT > self.height {
-                self.scroll();
+            b'\r' => {
+                self.x = 0;
+            }
+            // Backspace erases the previous cell; the cursor moves back without wrapping
+            b'\x08' => {
+                if self.x >= font::FONT_WIDTH {
+                    self.x -= font::FONT_WIDTH;
+                    self.draw_char(self.x, self.y, b' ');
+                }
+                return;
+            }
+            _ => {
+                self.draw_char(self.x, self.y, byte);
+                self.x += font::FONT_WIDTH;
             }
         }
+
+        // Перенос строки
+        if self.x + font::FONT_WIDTH > self.width {
+            self.x = 0;
+            self.y += font::FONT_HEIGHT;
+        }
+
+        // Скроллинг
+        if self.y + font::FONT_HEIGHT > self.height {
+            self.scroll();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                self.put_pixel(x, y, self.bg);
+            }
+        }
+        self.x = 0;
+        self.y = 0;
     }
 
     fn scroll(&mut self) {
@@ -121,4 +143,33 @@ impl VesaLogger {
         self.write_string(msg);
         self.write_string("\n");
     }
+}
+
+// Global console used by the shell via the kernel API; the boot logger keeps its own cursor.
+static mut CONSOLE: Option<VesaLogger> = None;
+
+pub fn console_init(fb_addr: u64, width: u32, height: u32, pitch: u32) {
+    unsafe {
+        CONSOLE = Some(VesaLogger::new(fb_addr, width, height, pitch));
+    }
+}
+
+pub fn console_reset() {
+    unsafe {
+        if let Some(ref mut console) = CONSOLE {
+            console.clear();
+        }
+    }
+}
+
+pub extern "C" fn console_putc(byte: u8) {
+    unsafe {
+        if let Some(ref mut console) = CONSOLE {
+            console.write_byte(byte);
+        }
+    }
+}
+
+pub extern "C" fn console_clear() {
+    console_reset();
 }

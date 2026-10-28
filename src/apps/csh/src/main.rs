@@ -3,9 +3,39 @@
 
 use core::arch::asm;
 
+// Must match KernelApi in src/cube_core/loader.rs; the kernel passes it in rdi.
+#[repr(C)]
+struct KernelApi {
+    putc: extern "C" fn(u8),
+    clear: extern "C" fn(),
+}
+
+static mut API: *const KernelApi = core::ptr::null();
+
 // Простой вывод в Serial (COM1)
 fn serial_out(byte: u8) {
     unsafe { asm!("out dx, al", in("dx") 0x3F8u16, in("al") byte) };
+}
+
+fn console_putc(byte: u8) {
+    unsafe {
+        if !API.is_null() {
+            ((*API).putc)(byte);
+        }
+    }
+}
+
+fn console_clear() {
+    unsafe {
+        if !API.is_null() {
+            ((*API).clear)();
+        }
+    }
+}
+
+fn out_byte(byte: u8) {
+    serial_out(byte);
+    console_putc(byte);
 }
 
 fn serial_print(s: &str) {
@@ -13,15 +43,27 @@ fn serial_print(s: &str) {
         if byte == b'\n' {
             serial_out(b'\r');
         }
+        out_byte(byte);
+    }
+}
+
+// For ANSI sequences that only a serial terminal understands
+fn serial_only(s: &str) {
+    for byte in s.bytes() {
         serial_out(byte);
     }
 }
 
-// Чтение символа с клавиатуры (через порт 0x60)
-fn keyboard_read() -> u8 {
+// Port 0x60 keeps returning the last scancode when empty, so only read it when port 0x64 reports data
+fn keyboard_read() -> Option<u8> {
+    let status: u8;
+    unsafe { asm!("in al, 0x64", out("al") status) };
+    if status & 0x01 == 0 {
+        return None;
+    }
     let sc: u8;
     unsafe { asm!("in al, 0x60", out("al") sc) };
-    sc
+    Some(sc)
 }
 
 // Простая таблица сканкодов → ASCII (только буквы и цифры)
@@ -49,7 +91,8 @@ fn scancode_to_ascii(sc: u8) -> Option<u8> {
 }
 
 #[no_mangle]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(api: *const KernelApi) -> ! {
+    unsafe { API = api };
     serial_print("\n");
     serial_print("========================================\n");
     serial_print("  CubeOS Shell v0.1 (csh)\n");
@@ -66,7 +109,10 @@ pub extern "C" fn _start() -> ! {
         // Читаем команду
         cmd_len = 0;
         loop {
-            let sc = keyboard_read();
+            let sc = match keyboard_read() {
+                Some(sc) => sc,
+                None => continue,
+            };
 
             // Игнорируем отпускание клавиш
             if sc & 0x80 != 0 {
@@ -75,7 +121,7 @@ pub extern "C" fn _start() -> ! {
 
             if let Some(ch) = scancode_to_ascii(sc) {
                 if ch == b'\n' {
-                    serial_out(b'\n');
+                    out_byte(b'\n');
                     break;
                 } else if ch == b'\x08' {
                     // Backspace
@@ -86,7 +132,7 @@ pub extern "C" fn _start() -> ! {
                 } else if cmd_len < 255 {
                     cmd_buf[cmd_len] = ch;
                     cmd_len += 1;
-                    serial_out(ch);
+                    out_byte(ch);
                 }
             }
         }
@@ -105,8 +151,9 @@ pub extern "C" fn _start() -> ! {
                 serial_print("\n");
             }
             "clear" => {
-                // Очищаем экран через ANSI (работает в Serial)
-                serial_print("\x1B[2J\x1B[H");
+                // ANSI clears a serial terminal; the framebuffer console clears through the kernel API
+                serial_only("\x1B[2J\x1B[H");
+                console_clear();
             }
             "exit" => {
                 serial_print("Goodbye!\n");

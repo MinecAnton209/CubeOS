@@ -24,7 +24,7 @@ section .boot
 bits 32
 global start
 extern rust_main
-extern _kernel_end
+extern _stack_top
 
 PML4_TABLE_ADDR   equ 0x10000
 PDPT_TABLE_ADDR   equ 0x11000
@@ -166,8 +166,7 @@ long_mode_start:
     mov gs, ax
     mov ss, ax
 
-    mov rsp, _kernel_end
-    add rsp, 0x2000
+    mov rsp, _stack_top
     and rsp, ~0xF
 
     ; Заполняем TSS и IOPB

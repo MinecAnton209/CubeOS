@@ -5,6 +5,18 @@ use crate::ata::AtaDrive;
 
 static mut PROGRAM_BUF: [u8; 65536] = [0; 65536];
 
+// Passed to the program in rdi; the layout must match KernelApi in the userland program.
+#[repr(C)]
+pub struct KernelApi {
+    pub putc: extern "C" fn(u8),
+    pub clear: extern "C" fn(),
+}
+
+static KERNEL_API: KernelApi = KernelApi {
+    putc: crate::vesa_log::console_putc,
+    clear: crate::vesa_log::console_clear,
+};
+
 pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
     crate::serial::send_string("[LOADER] Loading: ");
     crate::serial::send_string(path);
@@ -60,8 +72,9 @@ pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
 
         crate::serial::send_string("[LOADER] Jumping...\n");
 
-        let entry: extern "C" fn() = core::mem::transmute(program.entry_point);
-        entry();
+        crate::vesa_log::console_reset();
+        let entry: extern "C" fn(*const KernelApi) = core::mem::transmute(program.entry_point);
+        entry(&KERNEL_API);
     }
 
     false

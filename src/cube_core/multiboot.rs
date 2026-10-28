@@ -1,4 +1,6 @@
+use core::mem::size_of;
 use core::ptr;
+use crate::checks;
 
 #[derive(Debug, Clone, Copy)]
 pub struct FramebufferInfo {
@@ -27,7 +29,7 @@ impl MultibootInfo {
     pub unsafe fn parse(info_addr: u32) -> Self {
         let total_size = ptr::read(info_addr as *const u32);
         let mut ptr_cur = (info_addr as *const u32).add(2);
-        let end = (info_addr + total_size) as *const u32;
+        let end = info_addr.checked_add(total_size).unwrap_or(info_addr) as *const u32;
 
         let mut framebuffer = None;
         let mut mmap_ptr: *const MemoryMapEntry = core::ptr::null();
@@ -56,12 +58,15 @@ impl MultibootInfo {
                     });
                 }
                 6 => {
-                    // Memory map tag
-                    let entry_size = ptr::read(ptr_cur.add(2)) as usize;
-                    let entries_start = (ptr_cur as *const u8).add(16) as *const MemoryMapEntry;
-                    let entries_count = (size - 16) / entry_size;
-                    mmap_ptr = entries_start;
-                    mmap_entries = entries_count;
+                    // Memory map tag: type(4) + size(4) + entry_size(4) + entry_version(4) + entries
+                    if size >= 16 {
+                        let entry_size = ptr::read(ptr_cur.add(2)) as usize;
+                        let count = checks::mmap_entry_count(size, 16, entry_size, size_of::<MemoryMapEntry>());
+                        if count > 0 {
+                            mmap_ptr = (ptr_cur as *const u8).add(16) as *const MemoryMapEntry;
+                            mmap_entries = count;
+                        }
+                    }
                 }
                 _ => {}
             }
