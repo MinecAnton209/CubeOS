@@ -29,13 +29,25 @@ pub fn init() {
     INITIALIZED.store(true, Ordering::Release);
 }
 
-/// Отправка одного байта (с ожиданием готовности)
 pub fn send_byte(byte: u8) {
-    // Ждём, пока transmit holding register не станет пустым (бит 5 LSR)
-    while inb(COM1 + 5) & 0x20 == 0 {
-        core::hint::spin_loop();
+    unsafe {
+        core::arch::asm!(
+            "2:",
+            "mov dx, 0x3FD",      // Порт LSR (Line Status Register)
+            "in al, dx",          // Читаем статус
+            "test al, 0x20",      // Проверяем бит 5 (буфер передатчика пуст)
+            "jz 2b",              // Если 0, крутимся в цикле (2b = jump to label 2 backward)
+
+            "mov dx, 0x3F8",      // Порт данных COM1
+            "mov al, {byte}",     // Загружаем наш байт
+            "out dx, al",         // Отправляем байт
+
+            byte = in(reg_byte) byte,
+            out("dx") _,
+            out("al") _,
+            options(nomem, nostack)
+        );
     }
-    outb(COM1, byte);
 }
 
 /// Отправка строки

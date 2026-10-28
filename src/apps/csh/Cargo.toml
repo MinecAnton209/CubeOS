@@ -3,10 +3,14 @@ name = "csh"
 version = "0.1.0"
 edition = "2021"
 
-[profile.dev]
-panic = "abort"
+[dependencies]
+cube_syscall = { path = "../../libs/cube_syscall" }
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/main.rs"
 
 [profile.release]
 panic = "abort"
-opt-level = "z"
+opt-level = "s"
 lto = true

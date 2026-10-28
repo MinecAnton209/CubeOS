@@ -1,4 +1,4 @@
-// src/cube_core/idt.rs — исправленная таблица прерываний
+// src/cube_core/idt.rs
 use core::mem::size_of;
 
 const IDT_ENTRIES: usize = 256;
@@ -26,22 +26,26 @@ struct IdtEntry {
 
 impl IdtEntry {
     const fn new() -> Self {
-        Self {
-            offset_low: 0, selector: 0, ist: 0, flags: 0,
-            offset_mid: 0, offset_high: 0, reserved: 0,
-        }
+        Self { offset_low: 0, selector: 0, ist: 0, flags: 0,
+            offset_mid: 0, offset_high: 0, reserved: 0 }
     }
 
     pub fn set_handler_addr(&mut self, handler_addr: u64) {
         self.offset_low = (handler_addr & 0xFFFF) as u16;
-        self.selector = 0x08; // Kernel code segment
+        self.selector = 0x08;
         self.ist = 0;
-        self.flags = 0x8E;    // Present, DPL=0, Interrupt Gate
+        self.flags = 0x8E;
         self.offset_mid = ((handler_addr >> 16) & 0xFFFF) as u16;
         self.offset_high = (handler_addr >> 32) as u32;
         self.reserved = 0;
     }
 }
+
+// Обёртка для выравнивания статика (repr на static запрещён)
+#[repr(C, align(16))]
+struct IdtArray([IdtEntry; IDT_ENTRIES]);
+
+static mut IDT: IdtArray = IdtArray([IdtEntry::new(); IDT_ENTRIES]);
 
 #[repr(C, packed)]
 struct IdtPtr {
@@ -49,9 +53,7 @@ struct IdtPtr {
     base: u64,
 }
 
-static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::new(); IDT_ENTRIES];
-
-// === Обработчики исключений (0-31) ===
+// === Обработчики БЕЗ error code ===
 macro_rules! gen_stub {
     ($name:ident, $num:expr) => {
         #[unsafe(naked)]
@@ -69,25 +71,27 @@ macro_rules! gen_stub {
     };
 }
 
+// === Обработчики С error code ===
+// На входе: [rsp] = error_code, [rsp+8] = RIP
 macro_rules! gen_stub_error {
     ($name:ident, $num:expr) => {
         #[unsafe(naked)]
         extern "x86-interrupt" fn $name(_sf: &InterruptStackFrame, _error_code: u64) {
             core::arch::naked_asm!(
-                "push rdi",
+                "push rdi",              // [rsp] = rdi, [rsp+8] = error_code
                 "mov rdi, {num}",
+                "mov rsi, [rsp + 8]",    // error_code
                 "call {handler}",
-                "add rsp, 8",  // Убираем error code со стека
                 "pop rdi",
+                "add rsp, 8",            // снять error_code
                 "iretq",
                 num = const $num,
-                handler = sym exception_handler,
+                handler = sym exception_handler_with_code,
             );
         }
     };
 }
 
-// Генерируем все 32 обработчика исключений
 gen_stub!(isr0, 0);   gen_stub!(isr1, 1);   gen_stub!(isr2, 2);   gen_stub!(isr3, 3);
 gen_stub!(isr4, 4);   gen_stub!(isr5, 5);   gen_stub!(isr6, 6);   gen_stub!(isr7, 7);
 gen_stub_error!(isr8, 8);
@@ -101,126 +105,119 @@ gen_stub!(isr22, 22); gen_stub!(isr23, 23); gen_stub!(isr24, 24); gen_stub!(isr2
 gen_stub!(isr26, 26); gen_stub!(isr27, 27); gen_stub!(isr28, 28); gen_stub!(isr29, 29);
 gen_stub!(isr30, 30); gen_stub!(isr31, 31);
 
-// === Обработчик IRQ клавиатуры (ПРАВИЛЬНЫЙ — без двойного сохранения!) ===
-// Найди в src/idt.rs функцию keyboard_handler и замени её целиком на эту:
-
-extern "x86-interrupt" fn keyboard_handler(_sf: InterruptStackFrame) {
-    let scancode: u8;
-    unsafe {
-        // Читаем сканкод
-        core::arch::asm!("in al, 0x60", out("al") scancode);
-        // Отправляем в буфер прерываний
-        crate::interrupts::keyboard_push(scancode);
-        // Отправляем EOI ведущему PIC
-        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
-    }
-}
-
-// === Заглушка для остальных IRQ ===
 #[unsafe(naked)]
 extern "x86-interrupt" fn irq_stub(_sf: &InterruptStackFrame) {
     core::arch::naked_asm!(
         "push rax",
         "mov al, 0x20",
         "mov dx, 0x20",
-        "out dx, al",       // EOI для master PIC
+        "out dx, al",
         "pop rax",
         "iretq",
     );
 }
 
-// === Общий обработчик исключений ===
-#[no_mangle]
-pub extern "C" fn exception_handler(int_num: u64) {
-    let stop_code = match int_num {
-        0 => "DIVIDE_BY_ZERO",
-        1 => "DEBUG",
-        3 => "BREAKPOINT",
-        6 => "INVALID_OPCODE",
-        8 => "DOUBLE_FAULT",
-        10 => "INVALID_TSS",
-        11 => "SEGMENT_NOT_PRESENT",
-        12 => "STACK_SEGMENT_FAULT",
-        13 => "GENERAL_PROTECTION",
-        14 => "PAGE_FAULT",
-        17 => "ALIGNMENT_CHECK",
-        _ => "UNKNOWN_EXCEPTION",
-    };
-
-    crate::serial::log_error("EXCEPTION");
-    crate::serial::send_string("  Vector: ");
-    // Выводим номер вектора
-    let mut buf = [0u8; 20];
-    let mut i = 20;
-    let mut n = int_num;
-    if n == 0 {
-        i -= 1;
-        buf[i] = b'0';
-    } else {
-        while n > 0 {
-            i -= 1;
-            buf[i] = (n % 10) as u8 + b'0';
-            n /= 10;
-        }
-    }
-    crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
-    crate::serial::send_string("\n  Stop code: ");
-    crate::serial::send_string(stop_code);
-    crate::serial::send_string("\n");
-
-    // Halt
-    loop {
-        unsafe { core::arch::asm!("cli; hlt") }
+extern "x86-interrupt" fn keyboard_handler(_sf: InterruptStackFrame) {
+    let scancode: u8;
+    unsafe {
+        core::arch::asm!("in al, 0x60", out("al") scancode);
+        crate::interrupts::keyboard_push(scancode);
+        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
     }
 }
 
-pub unsafe fn init_idt() {
-    // Устанавливаем обработчики исключений
-    IDT[0].set_handler_addr(isr0 as u64);
-    IDT[1].set_handler_addr(isr1 as u64);
-    IDT[2].set_handler_addr(isr2 as u64);
-    IDT[3].set_handler_addr(isr3 as u64);
-    IDT[4].set_handler_addr(isr4 as u64);
-    IDT[5].set_handler_addr(isr5 as u64);
-    IDT[6].set_handler_addr(isr6 as u64);
-    IDT[7].set_handler_addr(isr7 as u64);
-    IDT[8].set_handler_addr(isr8 as u64);
-    IDT[9].set_handler_addr(isr9 as u64);
-    IDT[10].set_handler_addr(isr10 as u64);
-    IDT[11].set_handler_addr(isr11 as u64);
-    IDT[12].set_handler_addr(isr12 as u64);
-    IDT[13].set_handler_addr(isr13 as u64);
-    IDT[14].set_handler_addr(isr14 as u64);
-    IDT[15].set_handler_addr(isr15 as u64);
-    IDT[16].set_handler_addr(isr16 as u64);
-    IDT[17].set_handler_addr(isr17 as u64);
-    IDT[18].set_handler_addr(isr18 as u64);
-    IDT[19].set_handler_addr(isr19 as u64);
-    IDT[20].set_handler_addr(isr20 as u64);
-    IDT[21].set_handler_addr(isr21 as u64);
-    IDT[22].set_handler_addr(isr22 as u64);
-    IDT[23].set_handler_addr(isr23 as u64);
-    IDT[24].set_handler_addr(isr24 as u64);
-    IDT[25].set_handler_addr(isr25 as u64);
-    IDT[26].set_handler_addr(isr26 as u64);
-    IDT[27].set_handler_addr(isr27 as u64);
-    IDT[28].set_handler_addr(isr28 as u64);
-    IDT[29].set_handler_addr(isr29 as u64);
-    IDT[30].set_handler_addr(isr30 as u64);
-    IDT[31].set_handler_addr(isr31 as u64);
+#[no_mangle]
+pub extern "C" fn exception_handler(int_num: u64) {
+    crate::serial::log_error("EXCEPTION");
+    crate::serial::send_string("  Vector: ");
+    let mut buf = [0u8; 20];
+    let mut i = 20;
+    let mut n = int_num;
+    if n == 0 { i -= 1; buf[i] = b'0'; }
+    else { while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; } }
+    crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+    crate::serial::send_string("\n");
+    loop { unsafe { core::arch::asm!("cli; hlt") } }
+}
 
-    // Заглушки для IRQ 0x20-0x2F
-    for i in 0..16 {
-        IDT[0x20 + i].set_handler_addr(irq_stub as u64);
+#[no_mangle]
+pub extern "C" fn exception_handler_with_code(int_num: u64, error_code: u64) {
+    crate::serial::log_error("EXCEPTION");
+    crate::serial::send_string("  Vector: ");
+    let mut buf = [0u8; 20];
+    let mut i = 20;
+    let mut n = int_num;
+    if n == 0 { i -= 1; buf[i] = b'0'; }
+    else { while n > 0 { i -= 1; buf[i] = (n % 10) as u8 + b'0'; n /= 10; } }
+    crate::serial::send_string(core::str::from_utf8(&buf[i..]).unwrap_or("?"));
+    crate::serial::send_string(", err=0x");
+    for j in 0..16 {
+        let nib = ((error_code >> ((15 - j) * 4)) & 0xF) as u8;
+        buf[j] = if nib < 10 { b'0' + nib } else { b'A' + nib - 10 };
     }
+    crate::serial::send_string(core::str::from_utf8(&buf[..16]).unwrap_or("?"));
+    crate::serial::send_string("\n");
 
-    // Клавиатура (IRQ1 = вектор 0x21)
-    IDT[0x21].set_handler_addr(keyboard_handler as u64);
+    if int_num == 14 {
+        let cr2: u64;
+        unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2); }
+        crate::serial::send_string("  CR2=0x");
+        for j in 0..16 {
+            let nib = ((cr2 >> ((15 - j) * 4)) & 0xF) as u8;
+            buf[j] = if nib < 10 { b'0' + nib } else { b'A' + nib - 10 };
+        }
+        crate::serial::send_string(core::str::from_utf8(&buf[..16]).unwrap_or("?"));
+        crate::serial::send_string("\n");
+    }
+    loop { unsafe { core::arch::asm!("cli; hlt") } }
+}
 
-    // Загружаем IDT
+pub unsafe fn init_idt() {
+    IDT.0[0].set_handler_addr(isr0 as u64);
+    IDT.0[1].set_handler_addr(isr1 as u64);
+    IDT.0[2].set_handler_addr(isr2 as u64);
+    IDT.0[3].set_handler_addr(isr3 as u64);
+    IDT.0[4].set_handler_addr(isr4 as u64);
+    IDT.0[5].set_handler_addr(isr5 as u64);
+    IDT.0[6].set_handler_addr(isr6 as u64);
+    IDT.0[7].set_handler_addr(isr7 as u64);
+    IDT.0[8].set_handler_addr(isr8 as u64);
+    IDT.0[9].set_handler_addr(isr9 as u64);
+    IDT.0[10].set_handler_addr(isr10 as u64);
+    IDT.0[11].set_handler_addr(isr11 as u64);
+    IDT.0[12].set_handler_addr(isr12 as u64);
+    IDT.0[13].set_handler_addr(isr13 as u64);
+    IDT.0[14].set_handler_addr(isr14 as u64);
+    IDT.0[15].set_handler_addr(isr15 as u64);
+    IDT.0[16].set_handler_addr(isr16 as u64);
+    IDT.0[17].set_handler_addr(isr17 as u64);
+    IDT.0[18].set_handler_addr(isr18 as u64);
+    IDT.0[19].set_handler_addr(isr19 as u64);
+    IDT.0[20].set_handler_addr(isr20 as u64);
+    IDT.0[21].set_handler_addr(isr21 as u64);
+    IDT.0[22].set_handler_addr(isr22 as u64);
+    IDT.0[23].set_handler_addr(isr23 as u64);
+    IDT.0[24].set_handler_addr(isr24 as u64);
+    IDT.0[25].set_handler_addr(isr25 as u64);
+    IDT.0[26].set_handler_addr(isr26 as u64);
+    IDT.0[27].set_handler_addr(isr27 as u64);
+    IDT.0[28].set_handler_addr(isr28 as u64);
+    IDT.0[29].set_handler_addr(isr29 as u64);
+    IDT.0[30].set_handler_addr(isr30 as u64);
+    IDT.0[31].set_handler_addr(isr31 as u64);
+
+    for i in 0..16 {
+        IDT.0[0x20 + i].set_handler_addr(irq_stub as u64);
+    }
+    IDT.0[0x21].set_handler_addr(keyboard_handler as u64);
+
     let idt_ptr = IdtPtr {
         limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
-        base: IDT.as_ptr() as u64,
+        base: &raw const IDT as *const _ as u64,
     };
     core::arch::asm!("lidt [{}]", in(reg) &idt_ptr);
+}
+
+pub fn set_interrupt_handler(vector: usize, handler: u64) {
+    unsafe { IDT.0[vector].set_handler_addr(handler); }
 }

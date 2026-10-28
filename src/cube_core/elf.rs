@@ -1,16 +1,9 @@
-// src/cube_core/elf.rs — парсер ELF64
+// src/cube_core/elf.rs
 use core::mem::size_of;
 use crate::checks;
 
-// ELF magic
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-
-// Типы сегментов
-pub const PT_NULL: u32 = 0;
 pub const PT_LOAD: u32 = 1;
-pub const PT_DYNAMIC: u32 = 2;
-pub const PT_INTERP: u32 = 3;
-pub const PT_NOTE: u32 = 4;
 
 // Флаги сегментов
 pub const PF_X: u32 = 1;
@@ -45,9 +38,7 @@ pub struct Elf64Header {
     pub e_shstrndx: u16,
 }
 
-// Program header (сегмент)
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
 pub struct Elf64Phdr {
     pub p_type: u32,
     pub p_flags: u32,
@@ -59,35 +50,6 @@ pub struct Elf64Phdr {
     pub p_align: u64,
 }
 
-impl Elf64Header {
-    /// Проверяет валидность ELF заголовка
-    pub fn validate(&self) -> bool {
-        // Проверяем magic
-        if self.e_ident[0..4] != ELF_MAGIC {
-            return false;
-        }
-        // Проверяем 64-bit
-        if self.e_ident[4] != 2 {
-            return false;
-        }
-        // Проверяем little-endian
-        if self.e_ident[5] != 1 {
-            return false;
-        }
-        // Проверяем x86-64
-        if self.e_machine != 0x3E {
-            return false;
-        }
-        // Проверяем исполняемый файл
-        if self.e_type != 2 && self.e_type != 3 {
-            // ET_EXEC = 2, ET_DYN = 3 (PIE)
-            return false;
-        }
-        true
-    }
-}
-
-/// Информация о загруженной программе
 pub struct LoadedProgram {
     pub entry_point: u64,
     pub base_addr: u64,
@@ -116,8 +78,7 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
 
     let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
-    if !header.validate() {
-        crate::serial::send_string("[ELF] Invalid ELF header\n");
+    if header.e_ident[0..4] != ELF_MAGIC {
         return None;
     }
 
@@ -198,3 +159,4 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
         size: end_addr - base_addr,
     })
 }
+
