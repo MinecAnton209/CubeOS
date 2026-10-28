@@ -26,7 +26,7 @@ echo ""
 echo "[4/7] Сборка Rust ядра (CubeCORE)..."
 cd src/cube_core
 RUSTFLAGS="-C link-arg=-nostdlib -C relocation-model=static -C code-model=kernel" \
-cargo build -Z build-std=core,compiler_builtins \
+cargo +nightly build -Z build-std=core,compiler_builtins \
     -Z build-std-features=compiler-builtins-mem \
     --target x86_64-unknown-none \
     --release 2>&1 | grep -v "warning:" || true

@@ -1,5 +1,6 @@
 // src/cube_core/elf.rs — парсер ELF64
 use core::mem::size_of;
+use crate::checks;
 
 // ELF magic
 pub const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
@@ -15,6 +16,14 @@ pub const PT_NOTE: u32 = 4;
 pub const PF_X: u32 = 1;
 pub const PF_W: u32 = 2;
 pub const PF_R: u32 = 4;
+
+// Linker-provided end of the kernel image, including its stack region.
+extern "C" {
+    static _kernel_end: u8;
+}
+
+// boot.asm identity-maps the first 4 GiB, so user segments must stay below this address.
+const LOAD_REGION_END: u64 = 0x1_0000_0000;
 
 // ELF64 заголовок
 #[repr(C)]
@@ -85,6 +94,19 @@ pub struct LoadedProgram {
     pub size: u64,
 }
 
+fn kernel_end() -> u64 {
+    unsafe { &_kernel_end as *const u8 as u64 }
+}
+
+fn read_phdr(data: &[u8], header: &Elf64Header, idx: usize) -> Option<Elf64Phdr> {
+    let offset = header.e_phoff.checked_add(idx as u64 * header.e_phentsize as u64)?;
+    if !checks::range_fits(offset, size_of::<Elf64Phdr>() as u64, data.len() as u64) {
+        return None;
+    }
+    // Program headers are not guaranteed to be aligned inside the file buffer.
+    Some(unsafe { core::ptr::read_unaligned(data.as_ptr().add(offset as usize) as *const Elf64Phdr) })
+}
+
 /// Загружает ELF-файл из буфера в память
 /// Возвращает точку входа и базовый адрес
 pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
@@ -92,89 +114,52 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
         return None;
     }
 
-    let header: &Elf64Header = unsafe { &*(data.as_ptr() as *const Elf64Header) };
+    let header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const Elf64Header) };
 
     if !header.validate() {
         crate::serial::send_string("[ELF] Invalid ELF header\n");
         return None;
     }
 
-    crate::serial::send_string("[ELF] Entry point: 0x");
-    let mut buf = [0u8; 20];
-    for j in 0..16 {
-        let nibble = ((header.e_entry >> ((15 - j) * 4)) & 0xF) as u8;
-        buf[j] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+    if (header.e_phentsize as usize) < size_of::<Elf64Phdr>() {
+        crate::serial::send_string("[ELF] Program header size too small\n");
+        return None;
     }
-    crate::serial::send_string(core::str::from_utf8(&buf).unwrap_or("????????????????"));
-    crate::serial::send_string("\n");
 
-    crate::serial::send_string("[ELF] Program headers: ");
-    let mut n = header.e_phnum as usize;
-    let mut idx = 20;
-    while n > 0 { idx -= 1; buf[idx] = (n % 10) as u8 + b'0'; n /= 10; }
-    crate::serial::send_string(core::str::from_utf8(&buf[idx..]).unwrap_or("?"));
-    crate::serial::send_string("\n");
+    let region_start = kernel_end();
+    let file_len = data.len() as u64;
 
+    // Validate every segment and the entry point before writing any memory,
+    // so a malformed file cannot leave the kernel half-overwritten.
     let mut base_addr = u64::MAX;
     let mut end_addr = 0u64;
+    let mut entry_ok = false;
 
-    for ph_idx in 0..header.e_phnum as usize {  // ← переименовали i в ph_idx
-        let ph_offset = header.e_phoff as usize + ph_idx * header.e_phentsize as usize;
-        if ph_offset + size_of::<Elf64Phdr>() > data.len() {
-            crate::serial::send_string("[ELF] Program header out of bounds\n");
-            return None;
-        }
-
-        let phdr: &Elf64Phdr = unsafe { &*((data.as_ptr().add(ph_offset)) as *const Elf64Phdr) };
-
+    for ph_idx in 0..header.e_phnum as usize {
+        let phdr = read_phdr(data, &header, ph_idx)?;
         if phdr.p_type != PT_LOAD {
             continue;
         }
 
-        crate::serial::send_string("[ELF] Loading segment: vaddr=0x");
-        for j in 0..16 {
-            let nibble = ((phdr.p_vaddr >> ((15 - j) * 4)) & 0xF) as u8;
-            buf[j] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
-        }
-        crate::serial::send_string(core::str::from_utf8(&buf).unwrap_or("????????????????"));
-        crate::serial::send_string(", filesz=");
-        n = phdr.p_filesz as usize;
-        idx = 20;
-        while n > 0 { idx -= 1; buf[idx] = (n % 10) as u8 + b'0'; n /= 10; }
-        crate::serial::send_string(core::str::from_utf8(&buf[idx..]).unwrap_or("?"));
-        crate::serial::send_string(", memsz=");
-        n = phdr.p_memsz as usize;
-        idx = 20;
-        while n > 0 { idx -= 1; buf[idx] = (n % 10) as u8 + b'0'; n /= 10; }
-        crate::serial::send_string(core::str::from_utf8(&buf[idx..]).unwrap_or("?"));
-        crate::serial::send_string("\n");
-
-        let file_end = phdr.p_offset as usize + phdr.p_filesz as usize;
-        if file_end > data.len() {
-            crate::serial::send_string("[ELF] Segment extends beyond file\n");
+        if !checks::elf_segment_fits(
+            phdr.p_vaddr,
+            phdr.p_offset,
+            phdr.p_filesz,
+            phdr.p_memsz,
+            file_len,
+            region_start,
+            LOAD_REGION_END,
+        ) {
+            crate::serial::send_string("[ELF] Segment rejected: outside load region or malformed\n");
             return None;
         }
 
-        let dst = phdr.p_vaddr as *mut u8;
-        let src = unsafe { data.as_ptr().add(phdr.p_offset as usize) };  // ← обернули в unsafe
-
-        unsafe {
-            core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
-
-            if phdr.p_memsz > phdr.p_filesz {
-                let bss_start = dst.add(phdr.p_filesz as usize);
-                let bss_size = (phdr.p_memsz - phdr.p_filesz) as usize;
-                core::ptr::write_bytes(bss_start, 0, bss_size);
-            }
+        if phdr.p_flags & PF_X != 0 && checks::in_segment(header.e_entry, phdr.p_vaddr, phdr.p_memsz) {
+            entry_ok = true;
         }
 
-        if phdr.p_vaddr < base_addr {
-            base_addr = phdr.p_vaddr;
-        }
-        let seg_end = phdr.p_vaddr + phdr.p_memsz;
-        if seg_end > end_addr {
-            end_addr = seg_end;
-        }
+        base_addr = base_addr.min(phdr.p_vaddr);
+        end_addr = end_addr.max(phdr.p_vaddr + phdr.p_memsz);
     }
 
     if base_addr == u64::MAX {
@@ -182,23 +167,34 @@ pub fn load_elf(data: &[u8]) -> Option<LoadedProgram> {
         return None;
     }
 
-    crate::serial::send_string("[ELF] Loaded: 0x");
-    for j in 0..16 {
-        let nibble = ((base_addr >> ((15 - j) * 4)) & 0xF) as u8;
-        buf[j] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+    if !entry_ok {
+        crate::serial::send_string("[ELF] Entry point is not inside an executable segment\n");
+        return None;
     }
-    crate::serial::send_string(core::str::from_utf8(&buf).unwrap_or("????????????????"));
-    crate::serial::send_string(" - 0x");
-    for j in 0..16 {
-        let nibble = ((end_addr >> ((15 - j) * 4)) & 0xF) as u8;
-        buf[j] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+
+    for ph_idx in 0..header.e_phnum as usize {
+        let phdr = read_phdr(data, &header, ph_idx)?;
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+
+        unsafe {
+            let dst = phdr.p_vaddr as *mut u8;
+            let src = data.as_ptr().add(phdr.p_offset as usize);
+            core::ptr::copy_nonoverlapping(src, dst, phdr.p_filesz as usize);
+
+            if phdr.p_memsz > phdr.p_filesz {
+                let bss_start = dst.add(phdr.p_filesz as usize);
+                core::ptr::write_bytes(bss_start, 0, (phdr.p_memsz - phdr.p_filesz) as usize);
+            }
+        }
     }
-    crate::serial::send_string(core::str::from_utf8(&buf).unwrap_or("????????????????"));
-    crate::serial::send_string("\n");
+
+    crate::serial::send_string("[ELF] Loaded segments\n");
 
     Some(LoadedProgram {
         entry_point: header.e_entry,
-         base_addr,
-         size: end_addr - base_addr,
+        base_addr,
+        size: end_addr - base_addr,
     })
 }

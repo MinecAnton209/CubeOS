@@ -13,6 +13,7 @@ mod panic;
 mod fs;
 mod vesa_log;
 mod ata;
+mod checks;
 mod elf;
 mod loader;
 
@@ -270,43 +271,13 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
                 log_both(&mut vesa_log, "OK", "FAT32 filesystem mounted");
 
                 // Читаем конфиг
-                let mut config_buf = [0u8; 512];
+                let mut config_buf = [0u8; 4096];
                 if let Some(size) = fs.read_file(&ata, "/SYSTEM/CONFIG/BOOT.CFG", &mut config_buf) {
                     if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
                         log_both(&mut vesa_log, "OK", "Boot config loaded");
 
-                        // Парсим конфиг и ищем cmdline
-                        let mut cmdline = None;
-                        let mut start = 0;
-
-                        for (i, &byte) in text.as_bytes().iter().enumerate() {
-                            if byte == b'\n' || byte == b'\r' || i == text.len() - 1 {
-                                let line_end = if i == text.len() - 1 { i + 1 } else { i };
-                                let line = &text[start..line_end];
-                                let line = line.trim();
-
-                                // Ищем строку cmdline = "..."
-                                if line.starts_with("cmdline") {
-                                    if let Some(eq_pos) = line.find('=') {
-                                        let value = line[eq_pos + 1..].trim();
-                                        let value = value.trim_matches('"');
-                                        if !value.is_empty() {
-                                            cmdline = Some(value);
-                                        }
-                                    }
-                                }
-
-                                // Выводим строку конфига
-                                if !line.is_empty() && !line.starts_with('#') {
-                                    log_both(&mut vesa_log, "CFG", line);
-                                }
-
-                                start = i + 1;
-                                if byte == b'\r' && i + 1 < text.len() && text.as_bytes()[i + 1] == b'\n' {
-                                    start = i + 2;
-                                }
-                            }
-                        }
+                        // Handles LF and CRLF line endings; see checks::config_cmdline
+                        let cmdline = checks::config_cmdline(text);
 
                         // Запускаем программу из cmdline
                         if let Some(cmd) = cmdline {

@@ -17,11 +17,16 @@ fn serial_print(s: &str) {
     }
 }
 
-// Чтение символа с клавиатуры (через порт 0x60)
-fn keyboard_read() -> u8 {
+// Port 0x60 keeps returning the last scancode when empty, so only read it when port 0x64 reports data
+fn keyboard_read() -> Option<u8> {
+    let status: u8;
+    unsafe { asm!("in al, 0x64", out("al") status) };
+    if status & 0x01 == 0 {
+        return None;
+    }
     let sc: u8;
     unsafe { asm!("in al, 0x60", out("al") sc) };
-    sc
+    Some(sc)
 }
 
 // Простая таблица сканкодов → ASCII (только буквы и цифры)
@@ -66,7 +71,10 @@ pub extern "C" fn _start() -> ! {
         // Читаем команду
         cmd_len = 0;
         loop {
-            let sc = keyboard_read();
+            let sc = match keyboard_read() {
+                Some(sc) => sc,
+                None => continue,
+            };
 
             // Игнорируем отпускание клавиш
             if sc & 0x80 != 0 {

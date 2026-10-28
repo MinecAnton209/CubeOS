@@ -1,5 +1,9 @@
 use crate::multiboot::MemoryMapEntry;
 
+extern "C" {
+    static _kernel_end: u8;
+}
+
 const MAX_PAGES: usize = 1024 * 1024;
 const PAGE_SIZE: usize = 4096;
 
@@ -30,12 +34,15 @@ pub fn init(memory_map: &[MemoryMapEntry]) {
         TOTAL_PAGES = MAX_PAGES;
         FREE_PAGES = (free_bytes / PAGE_SIZE as u64) as usize;
 
-        for page in 0..512 {
+        // Everything below the kernel image end (low memory, page tables, kernel, stack) is never allocatable.
+        let kernel_end = &_kernel_end as *const u8 as usize;
+        let reserved_pages = ((kernel_end + PAGE_SIZE - 1) / PAGE_SIZE).min(MAX_PAGES);
+        for page in 0..reserved_pages {
             let idx = page / 64;
             let bit = page % 64;
             if BITMAP[idx] & (1 << bit) != 0 {
                 BITMAP[idx] &= !(1 << bit);
-                FREE_PAGES -= 1;
+                FREE_PAGES = FREE_PAGES.saturating_sub(1);
             }
         }
     }

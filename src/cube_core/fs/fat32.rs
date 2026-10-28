@@ -1,5 +1,6 @@
 // src/fs/fat32.rs — полный FAT32 драйвер
 use crate::ata::AtaDrive;
+use crate::checks;
 
 const SECTOR_SIZE: usize = 512;
 const DIR_ENTRY_SIZE: usize = 32;
@@ -89,6 +90,7 @@ pub struct BpbFat32 {
     pub data_start_lba: u32,
     pub fat_size_sectors: u32,
     pub total_sectors: u32,
+    pub cluster_count: u32,
 }
 
 /// FAT32 том
@@ -152,8 +154,16 @@ impl Fat32 {
             return None;
         }
 
-        let fat_start_lba = start_lba + reserved_sectors as u32;
-        let data_start_lba = fat_start_lba + fat_size_sectors * num_fats as u32;
+        let layout = checks::fat_layout(
+            total_sectors,
+            reserved_sectors,
+            num_fats,
+            fat_size_sectors,
+            sectors_per_cluster,
+            root_cluster,
+        )?;
+        let fat_start_lba = reserved_sectors as u32;
+        let data_start_lba = layout.data_start_rel;
 
         crate::serial::send_string("[FS] BPB: bytes_per_sector=");
         let mut buf = [0u8; 20];
@@ -197,10 +207,11 @@ impl Fat32 {
                 root_cluster,
                 fs_info_sector,
                 backup_boot_sector,
-                fat_start_lba: reserved_sectors as u32,  // ← убрали partition_start
-                data_start_lba: reserved_sectors as u32 + fat_size_sectors * num_fats as u32,  // ← убрали partition_start
+                fat_start_lba,
+                data_start_lba,
                 fat_size_sectors,
                 total_sectors,
+                cluster_count: layout.cluster_count,
             },
             partition_start: start_lba,
         })
@@ -216,6 +227,12 @@ impl Fat32 {
         ata.write_sector(self.partition_start + lba, buf)
     }
 
+    /// Counts one step along a cluster chain; true once it is longer than the volume (a loop).
+    fn chain_exceeded(&self, visited: &mut u32) -> bool {
+        *visited += 1;
+        *visited > self.bpb.cluster_count
+    }
+
     /// LBA первого сектора кластера
     pub fn cluster_to_lba(&self, cluster: u32) -> u32 {
         self.bpb.data_start_lba + (cluster - 2) * self.bpb.sectors_per_cluster as u32
@@ -223,6 +240,9 @@ impl Fat32 {
 
     /// Читает весь кластер в буфер (должен быть >= sectors_per_cluster * 512)
     pub fn read_cluster(&self, ata: &AtaDrive, cluster: u32, buf: &mut [u8]) -> bool {
+        if !checks::cluster_in_range(cluster, self.bpb.cluster_count) {
+            return false;
+        }
         let lba = self.cluster_to_lba(cluster);
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
         if buf.len() < cluster_bytes {
@@ -241,6 +261,9 @@ impl Fat32 {
 
     /// Записывает кластер из буфера
     pub fn write_cluster(&self, ata: &AtaDrive, cluster: u32, buf: &[u8]) -> bool {
+        if !checks::cluster_in_range(cluster, self.bpb.cluster_count) {
+            return false;
+        }
         let lba = self.cluster_to_lba(cluster);
         for i in 0..self.bpb.sectors_per_cluster {
             let off = i as usize * SECTOR_SIZE;
@@ -255,6 +278,9 @@ impl Fat32 {
 
     /// Читает FAT entry для кластера
     pub fn read_fat_entry(&self, ata: &AtaDrive, cluster: u32) -> Option<u32> {
+        if !checks::cluster_in_range(cluster, self.bpb.cluster_count) {
+            return None;
+        }
         let fat_offset = cluster * 4;
         let fat_sector = self.bpb.fat_start_lba + fat_offset / SECTOR_SIZE as u32;
         let fat_offset_in_sector = (fat_offset % SECTOR_SIZE as u32) as usize;
@@ -276,6 +302,9 @@ impl Fat32 {
 
     /// Записывает FAT entry (обновляет обе копии FAT)
     pub fn write_fat_entry(&self, ata: &AtaDrive, cluster: u32, value: u32) -> bool {
+        if !checks::cluster_in_range(cluster, self.bpb.cluster_count) {
+            return false;
+        }
         let fat_offset = cluster * 4;
         let fat_sector = self.bpb.fat_start_lba + fat_offset / SECTOR_SIZE as u32;
         let fat_offset_in_sector = (fat_offset % SECTOR_SIZE as u32) as usize;
@@ -300,8 +329,8 @@ impl Fat32 {
     /// Получает следующий кластер в цепочке
     pub fn next_cluster(&self, ata: &AtaDrive, cluster: u32) -> Option<u32> {
         let entry = self.read_fat_entry(ata, cluster)?;
-        if entry >= 0x0FFFFFF8 {
-            None // Конец цепочки
+        if entry >= 0x0FFFFFF8 || !checks::cluster_in_range(entry, self.bpb.cluster_count) {
+            None // Конец цепочки, либо битая ссылка, по которой нельзя идти
         } else {
             Some(entry)
         }
@@ -315,7 +344,7 @@ impl Fat32 {
     /// Находит первый свободный кластер
     pub fn find_free_cluster(&self, ata: &AtaDrive) -> Option<u32> {
         // Начинаем с кластера 3 (0 и 1 зарезервированы, 2 = root)
-        for cluster in 3..(self.bpb.total_sectors / self.bpb.sectors_per_cluster as u32) {
+        for cluster in 3..self.bpb.cluster_count + 2 {
             if let Some(entry) = self.read_fat_entry(ata, cluster) {
                 if entry == FAT_ENTRY_FREE {
                     return Some(cluster);
@@ -332,7 +361,18 @@ impl Fat32 {
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
         let mut cluster_buf = [0u8; 32768]; // до 64 секторов на кластер
 
+        if file_size == 0 {
+            return Some(0);
+        }
+        if !checks::cluster_in_range(start_cluster, self.bpb.cluster_count) {
+            return None;
+        }
+
+        let mut visited = 0u32;
         while total_read < buf.len() && total_read < file_size as usize {
+            if self.chain_exceeded(&mut visited) {
+                return None;
+            }
             if !self.read_cluster(ata, cluster, &mut cluster_buf) {
                 return Some(total_read);
             }
@@ -353,6 +393,9 @@ impl Fat32 {
     /// Возвращает новый стартовый кластер (может измениться, если файл был пустой).
     pub fn write_file_data(&self, ata: &AtaDrive, start_cluster: u32, data: &[u8]) -> Option<u32> {
         let cluster_bytes = self.bpb.sectors_per_cluster as usize * SECTOR_SIZE;
+        if start_cluster != 0 && !checks::cluster_in_range(start_cluster, self.bpb.cluster_count) {
+            return None;
+        }
         let mut cluster = if start_cluster == 0 {
             // Файл пустой — выделяем первый кластер
             let c = self.find_free_cluster(ata)?;
@@ -407,7 +450,11 @@ impl Fat32 {
             if !self.write_fat_entry(ata, c, FAT_ENTRY_END) { return None; };
             // Освобождаем остаток цепочки
             let mut free_c = extra;
+            let mut freed = 0u32;
             loop {
+                if self.chain_exceeded(&mut freed) {
+                    return None;
+                }
                 match self.next_cluster(ata, free_c) {
                     Some(next) => {
                         if !self.write_fat_entry(ata, free_c, FAT_ENTRY_FREE) { return None; };
@@ -432,7 +479,14 @@ impl Fat32 {
         let entries_per_cluster = cluster_bytes / DIR_ENTRY_SIZE;
         let mut cluster_buf = [0u8; 32768];
 
+        if !checks::cluster_in_range(dir_cluster, self.bpb.cluster_count) {
+            return 0;
+        }
+        let mut visited = 0u32;
         loop {
+            if self.chain_exceeded(&mut visited) {
+                break;
+            }
             if !self.read_cluster(ata, cluster, &mut cluster_buf) {
                 break;
             }
@@ -486,7 +540,14 @@ impl Fat32 {
         let mut cluster_buf = [0u8; 32768];
         let mut global_index = 0usize;
 
+        if !checks::cluster_in_range(dir_cluster, self.bpb.cluster_count) {
+            return None;
+        }
+        let mut visited = 0u32;
         loop {
+            if self.chain_exceeded(&mut visited) {
+                return None;
+            }
             if !self.read_cluster(ata, cluster, &mut cluster_buf) {
                 return None;
             }
@@ -528,7 +589,14 @@ impl Fat32 {
         let entries_per_cluster = cluster_bytes / DIR_ENTRY_SIZE;
         let mut cluster_buf = [0u8; 32768];
 
+        if !checks::cluster_in_range(dir_cluster, self.bpb.cluster_count) {
+            return None;
+        }
+        let mut visited = 0u32;
         loop {
+            if self.chain_exceeded(&mut visited) {
+                return None;
+            }
             if !self.read_cluster(ata, cluster, &mut cluster_buf) {
                 return None;
             }
@@ -706,9 +774,13 @@ impl Fat32 {
             }
 
             // Освобождаем цепочку кластеров
-            if file_cluster >= 2 {
+            if checks::cluster_in_range(file_cluster, self.bpb.cluster_count) {
                 let mut c = file_cluster;
+                let mut freed = 0u32;
                 loop {
+                    if self.chain_exceeded(&mut freed) {
+                        return false;
+                    }
                     match self.next_cluster(ata, c) {
                         Some(next) => {
                             if !self.write_fat_entry(ata, c, FAT_ENTRY_FREE) { return false; };
