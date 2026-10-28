@@ -105,6 +105,7 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     let mut vesa_log = if let Some(fb) = mb_info.framebuffer {
         if fb.addr != 0 && fb.width > 0 && fb.height > 0 {
             let mut logger = vesa_log::VesaLogger::new(fb.addr, fb.width, fb.height, fb.pitch);
+            vesa_log::console_init(fb.addr, fb.width, fb.height, fb.pitch);
             logger.write_string("========================================\n");
             logger.write_string("  CubeCORE v1.0 — Kernel Boot Sequence\n");
             logger.write_string("========================================\n\n");
