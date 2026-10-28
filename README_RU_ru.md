@@ -30,17 +30,20 @@
 git clone https://github.com/cubeweb-lab/CubeOS.git
 cd CubeOS
 
-# Собираем ядро
-make
+# Собираем ядро и csh
+make all
 
 # Создаём загрузочный ISO
-make cubeos.iso
-# ИЛИ создаём образ HDD
-bash create_hdd.sh
-bash update_system.sh
+make iso
+# ИЛИ создаём/обновляем образ HDD (root не нужен)
+make hdd
 
-# 4. Запускаем в QEMU
-make run
+# Запускаем в QEMU
+make run        # из ISO
+make run-hdd    # из образа HDD
+
+# Тесты host-части
+make test
 ```
 
 Участие в разработке
