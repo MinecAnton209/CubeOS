@@ -1,30 +1,9 @@
-use crate::ata::AtaDrive;
+// src/cube_core/loader.rs — загрузчик программ
+use crate::elf;
 use crate::fs::FSManager;
-use crate::elf::{self, Program, Segment};
-use crate::mm; // Предполагаем, что у вас есть модуль управления памятью для отображения страниц
+use crate::ata::AtaDrive;
 
-const MAX_PROGRAM_SIZE: usize = 524288; // Увеличено до 512 КБ для больших шеллов
-const USER_STACK_SIZE: usize = 16384;
-const USER_STACK_ADDR: u64 = 0x7FFF0000;
-const ELF_VADDR_BASE: u64 = 0x1000000; // Ожидаемый базовый адрес линковки
-
-#[repr(C, align(4096))]
-struct ProgramBuf([u8; MAX_PROGRAM_SIZE]);
-
-#[link_section = ".program_buf"]
-static mut PROGRAM_BUF: ProgramBuf = ProgramBuf([0; MAX_PROGRAM_SIZE]);
-
-#[repr(C, align(16))]
-struct KernelStack([u8; 16384]);
-
-#[link_section = ".kernel_stack"]
-static mut KERNEL_STACK: KernelStack = KernelStack([0; 16384]);
-
-// Функция для копирования в физическую память (если используется identity mapping)
-// Если у вас полноценный VMM, используйте маппер из mm:: вместо прямого копирования
-unsafe fn copy_to_phys(dst: u64, src: *const u8, len: usize) {
-    core::ptr::copy_nonoverlapping(src, dst as *mut u8, len);
-}
+static mut PROGRAM_BUF: [u8; 65536] = [0; 65536];
 
 // Passed to the program in rdi; the layout must match KernelApi in the userland program.
 #[repr(C)]
@@ -44,44 +23,59 @@ pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
     crate::serial::send_string("\n");
 
     unsafe {
-        // 1. Читаем ВЕСЬ файл в буфер
-        let file_size = match fs.read_file(ata, path, &mut PROGRAM_BUF.0) {
-            Some(s) => s,
+        let size = match fs.read_file(ata, path, &mut PROGRAM_BUF) {
+            Some(s) => {
+                crate::serial::send_string("[LOADER] Read ");
+                let mut num_buf = [0u8; 20];
+                let mut n = s;
+                let mut i = 20;
+                while n > 0 { i -= 1; num_buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
+                crate::serial::send_string(core::str::from_utf8(&num_buf[i..]).unwrap_or("?"));
+                crate::serial::send_string(" bytes\n");
+                s
+            },
             None => {
                 crate::serial::send_string("[LOADER] ERROR: File not found!\n");
                 return false;
             }
         };
 
-        if file_size > MAX_PROGRAM_SIZE {
-            crate::serial::send_string("[LOADER] ERROR: File too large!\n");
+        if size == 0 {
+            crate::serial::send_string("[LOADER] ERROR: File is empty!\n");
             return false;
         }
 
-        if file_size < 4 || PROGRAM_BUF.0[0] != 0x7F || PROGRAM_BUF.0[1] != b'E'
-            || PROGRAM_BUF.0[2] != b'L' || PROGRAM_BUF.0[3] != b'F' {
-                crate::serial::send_string("[LOADER] ERROR: Invalid ELF!\n");
+        // Проверяем ELF magic
+        if PROGRAM_BUF[0] != 0x7F || PROGRAM_BUF[1] != b'E' || PROGRAM_BUF[2] != b'L' || PROGRAM_BUF[3] != b'F' {
+            crate::serial::send_string("[LOADER] ERROR: Not a valid ELF file!\n");
+            return false;
+        }
+
+        crate::serial::send_string("[LOADER] Valid ELF detected\n");
+
+        let program = match elf::load_elf(&PROGRAM_BUF[..size]) {
+            Some(p) => p,
+            None => {
+                crate::serial::send_string("[LOADER] ERROR: ELF load failed\n");
                 return false;
             }
+        };
 
-            // 2. Парсим ELF (ваш текущий код elf::load_elf)
-            let program = match elf::load_elf(&PROGRAM_BUF.0[..file_size]) {
-                Some(p) => p,
-                None => {
-                    crate::serial::send_string("[LOADER] ERROR: ELF parse failed\n");
-                    return false;
-                }
-            };
+        crate::serial::send_string("[LOADER] Entry: 0x");
+        let mut hex_buf = [0u8; 16];
+        for i in 0..16 {
+            let nibble = ((program.entry_point >> ((15 - i) * 4)) & 0xF) as u8;
+            hex_buf[i] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+        }
+        crate::serial::send_string(core::str::from_utf8(&hex_buf).unwrap_or("?"));
+        crate::serial::send_string("\n");
 
-            // 3. КОПИРУЕМ СЕГМЕНТЫ В ПАМЯТЬ ПО АДРЕСАМ ELF
-            // Это критический шаг, которого не хватало
-            for seg in program.segments {
-                if seg.file_size == 0 {
-                    continue;
-                }
+        crate::serial::send_string("[LOADER] Jumping...\n");
 
         crate::vesa_log::console_reset();
         let entry: extern "C" fn(*const KernelApi) = core::mem::transmute(program.entry_point);
         entry(&KERNEL_API);
     }
+
+    false
 }

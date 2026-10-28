@@ -7,6 +7,7 @@ mod vga;
 mod multiboot;
 mod idt;
 mod interrupts;
+mod apic;
 mod memory;
 mod sync;
 mod panic;
@@ -19,9 +20,11 @@ mod loader;
 mod tss;
 mod ring3;
 mod syscall;
+mod sched;
 
 use multiboot::MultibootInfo;
 use core::arch::asm;
+use core::sync::atomic::Ordering;
 use fs::FSManager;
 use ata::AtaDrive;
 
@@ -65,9 +68,7 @@ fn write_hex(buf: &mut [u8], n: u64) -> &str {
     core::str::from_utf8(buf).unwrap_or("????????")
 }
 
-/// Единая функция логирования: пишет в Serial + VESA (если инициализирован)
 pub fn log_both(vesa_log: &mut Option<vesa_log::VesaLogger>, level: &str, msg: &str) {
-    // Всегда в Serial
     match level {
         "OK"    => serial::log_ok(msg),
         "INFO"  => serial::log_info(msg),
@@ -75,26 +76,41 @@ pub fn log_both(vesa_log: &mut Option<vesa_log::VesaLogger>, level: &str, msg: &
         "ERROR" => serial::log_error(msg),
         _       => serial::send_string(msg),
     }
-    // И в VESA, если логгер доступен
     if let Some(ref mut logger) = vesa_log {
         logger.log(level, msg);
     }
 }
 
 #[no_mangle]
+pub extern "C" fn task_a() -> ! {
+    loop {
+        crate::serial::send_string("A");
+        for _ in 0..1_000_000 { unsafe { core::arch::asm!("nop") }; }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn task_b() -> ! {
+    loop {
+        crate::serial::send_string("B");
+        for _ in 0..1_000_000 { unsafe { core::arch::asm!("nop") }; }
+    }
+}
+
+#[no_mangle]
 pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
-    // 1. СНАЧАЛА парсим Multiboot!
+    // 1. Multiboot
     let mb_info = unsafe { MultibootInfo::parse(info_addr) };
     let mut buf = [0u8; 20];
 
-    // 2. Инициализация Serial и VGA
+    // 2. Serial + VGA
     serial::init();
     serial::send_string("\n========================================\n");
     serial::send_string("  CubeCORE v1.0 — Kernel Boot Sequence\n");
     serial::send_string("========================================\n");
     vga::init();
 
-    // 3. Проверка Magic
+    // 3. Magic
     if magic != 0x36d76289 {
         serial::log_error("Invalid Multiboot2 magic!");
         serial::send_string("  Got: 0x");
@@ -104,7 +120,7 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     }
     serial::log_ok("Multiboot2 magic valid");
 
-    // 4. Инициализация VESA логгера (живёт всю функцию как Option)
+    // 4. VESA logger
     let mut vesa_log = if let Some(fb) = mb_info.framebuffer {
         if fb.addr != 0 && fb.width > 0 && fb.height > 0 {
             let mut logger = vesa_log::VesaLogger::new(fb.addr, fb.width, fb.height, fb.pitch);
@@ -114,14 +130,10 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
             logger.write_string("========================================\n\n");
             logger.log("OK", "Framebuffer initialized");
             Some(logger)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+        } else { None }
+    } else { None };
 
-    // 5. CPU Info
+    // 5. CPU info
     let (vendor, eax) = get_cpu_info();
     let family = ((eax >> 8) & 0xF) + ((eax >> 20) & 0xFF);
     let model = ((eax >> 4) & 0xF) + (((eax >> 16) & 0xF) << 4);
@@ -143,7 +155,7 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
         logger.write_string("\n");
     }
 
-    // 6. Multiboot Info
+    // 6. Multiboot info
     serial::send_string("[INFO ] Multiboot2 info at 0x");
     serial::send_string(write_hex(&mut buf, info_addr as u64));
     serial::send_string(", size ");
@@ -158,22 +170,15 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
         logger.write_string(" bytes\n");
     }
 
-    // 7. Memory Map
+    // 7. Memory map
     serial::send_string("[INFO ] Memory map: ");
     serial::send_string(write_num(&mut buf, mb_info.memory_map.len()));
     serial::send_string(" entries\n");
-
-    if let Some(ref mut logger) = vesa_log {
-        logger.write_string("[INFO ] Memory map: ");
-        logger.write_string(write_num(&mut buf, mb_info.memory_map.len()));
-        logger.write_string(" entries\n");
-    }
 
     for (idx, entry) in mb_info.memory_map.iter().enumerate() {
         serial::send_string("  [");
         serial::send_string(write_num(&mut buf, idx));
         serial::send_string("] ");
-
         let type_str = match entry.typ {
             1 => "Available ", 2 => "Reserved  ", 3 => "ACPI Rec  ",
             4 => "ACPI NVS  ", 5 => "Bad Mem   ", _ => "Unknown   ",
@@ -184,18 +189,6 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
         serial::send_string(" (");
         serial::send_string(write_num(&mut buf, (entry.length / 1024) as usize));
         serial::send_string(" KB)\n");
-
-        if let Some(ref mut logger) = vesa_log {
-            logger.write_string("  [");
-            logger.write_string(write_num(&mut buf, idx));
-            logger.write_string("] ");
-            logger.write_string(type_str);
-            logger.write_string(" 0x");
-            logger.write_string(write_hex(&mut buf, entry.base_addr));
-            logger.write_string(" (");
-            logger.write_string(write_num(&mut buf, (entry.length / 1024) as usize));
-            logger.write_string(" KB)\n");
-        }
     }
 
     let total_mb = mb_info.total_memory() / 1024 / 1024;
@@ -206,15 +199,7 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     serial::send_string(write_num(&mut buf, avail_mb as usize));
     serial::send_string(" MB\n");
 
-    if let Some(ref mut logger) = vesa_log {
-        logger.write_string("[INFO ] Total RAM: ");
-        logger.write_string(write_num(&mut buf, total_mb as usize));
-        logger.write_string(" MB, Available: ");
-        logger.write_string(write_num(&mut buf, avail_mb as usize));
-        logger.write_string(" MB\n");
-    }
-
-    // 8. Memory Manager
+    // 8. PMM
     memory::init(mb_info.memory_map);
     serial::send_string("[INFO ] PMM: ");
     serial::send_string(write_num(&mut buf, memory::free_pages()));
@@ -223,92 +208,95 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     serial::send_string(" MB)\n");
     serial::log_ok("Physical Memory Manager initialized");
 
-    if let Some(ref mut logger) = vesa_log {
-        logger.write_string("[INFO ] PMM: ");
-        logger.write_string(write_num(&mut buf, memory::free_pages()));
-        logger.write_string(" free pages (");
-        logger.write_string(write_num(&mut buf, memory::free_memory_mb() as usize));
-        logger.write_string(" MB)\n");
-        logger.log("OK", "Physical Memory Manager initialized");
-    }
-
-    // 9. IDT, PIC, Keyboard
+    // 9. IDT
     unsafe { idt::init_idt(); }
     serial::log_ok("IDT initialized (256 entries)");
-    if let Some(ref mut logger) = vesa_log { logger.log("OK", "IDT initialized (256 entries)"); }
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "IDT initialized"); }
 
+    // 10. PIC remap — для совместимости, потом отключим
     interrupts::remap_pic();
-    interrupts::mask_all_irqs();
-    serial::log_ok("PIC remapped (IRQ 0-15 → vectors 0x20-0x2F)");
+    serial::log_ok("PIC remapped");
     if let Some(ref mut logger) = vesa_log { logger.log("OK", "PIC remapped"); }
 
-    interrupts::enable_irq(1);
-    serial::log_ok("Keyboard enabled (IRQ1)");
-    if let Some(ref mut logger) = vesa_log { logger.log("OK", "Keyboard enabled"); }
+    // 11. Local APIC
+    let lapic_base = apic::enable();
+    apic::init();
+    serial::send_string("[APIC] Local APIC base = 0x");
+    serial::send_string(write_hex(&mut buf, lapic_base));
+    serial::send_string("\n");
+    serial::log_ok("Local APIC initialized");
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "Local APIC initialized"); }
 
+    // 12. APIC timer 100 Hz
+    apic::timer_init_periodic(100);
+    serial::log_ok("APIC timer 100 Hz");
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "APIC timer 100 Hz"); }
+
+    //13. Scheduler init
+    sched::init();
+    serial::log_ok("Scheduler initialized");
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "Scheduler initialized"); }
+
+    // 14. I/O APIC: клавиатура IRQ1 → вектор 0x21
+    apic::ioapic_set_irq(1, 0x21, 0);
+    serial::log_ok("I/O APIC IRQ1 → 0x21");
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "I/O APIC IRQ1"); }
+
+    // 15. Отключить PIC
+    apic::pic_disable();
+    serial::log_ok("PIC disabled");
+    if let Some(ref mut logger) = vesa_log { logger.log("OK", "PIC disabled"); }
+
+    // 16. Прерывания
     unsafe { core::arch::asm!("sti"); }
     serial::log_ok("Interrupts enabled (IF=1)");
     if let Some(ref mut logger) = vesa_log { logger.log("OK", "Interrupts enabled"); }
 
-    // ATA и FAT32 инициализация
+    // 17. ATA + FAT32
     unsafe { asm!("cli"); }
     let mut ata = AtaDrive::new();
     let mut fs = FSManager::new();
     ata.init();
 
-    // === ATA инициализация ===
     log_both(&mut vesa_log, "INFO", "Initializing ATA controller...");
 
     if ata.exists {
         log_both(&mut vesa_log, "OK", "ATA controller detected");
 
-        // Инициализируем ATA-драйвер полностью
-        let mut ata = ata::AtaDrive::new();
-        ata.init();
+        if fs.mount_fat32(&ata, 1) {
+            log_both(&mut vesa_log, "OK", "FAT32 filesystem mounted");
 
-        if ata.exists {
-            log_both(&mut vesa_log, "OK", "ATA drive initialized");
+            let mut config_buf = [0u8; 4096];
+            if let Some(size) = fs.read_file(&ata, "/SYSTEM/CONFIG/BOOT.CFG", &mut config_buf) {
+                if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
+                    log_both(&mut vesa_log, "OK", "Boot config loaded");
 
-            // Монтируем FAT32 (второй раздел, индекс 1)
-            let mut fs = fs::FSManager::new();
-            if fs.mount_fat32(&ata, 1) {
-                log_both(&mut vesa_log, "OK", "FAT32 filesystem mounted");
+                    let cmdline = checks::config_cmdline(text);
 
-                // Читаем конфиг
-                let mut config_buf = [0u8; 4096];
-                if let Some(size) = fs.read_file(&ata, "/SYSTEM/CONFIG/BOOT.CFG", &mut config_buf) {
-                    if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
-                        log_both(&mut vesa_log, "OK", "Boot config loaded");
-
-                        // Handles LF and CRLF line endings; see checks::config_cmdline
-                        let cmdline = checks::config_cmdline(text);
-
-                        // Запускаем программу из cmdline
-                        if let Some(cmd) = cmdline {
-                            log_both(&mut vesa_log, "INFO", "Launching program from cmdline...");
-                            if loader::exec(&ata, &fs, cmd) {
-                                log_both(&mut vesa_log, "OK", "Program launched successfully");
-                            } else {
-                                log_both(&mut vesa_log, "ERROR", "Failed to launch program");
-                            }
+                    if let Some(cmd) = cmdline {
+                        log_both(&mut vesa_log, "INFO", "Launching program from cmdline...");
+                        if loader::exec(&ata, &fs, cmd) {
+                            log_both(&mut vesa_log, "OK", "Program launched successfully");
                         } else {
-                            log_both(&mut vesa_log, "INFO", "No cmdline in config, skipping program launch");
+                            log_both(&mut vesa_log, "ERROR", "Failed to launch program");
                         }
+                    } else {
+                        log_both(&mut vesa_log, "INFO", "No cmdline in config, skipping program launch");
                     }
-                    if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
-                        for line in text.lines() {
-                            log_both(&mut vesa_log, "CFG", line);
-                        }
+                }
+                if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
+                    for line in text.lines() {
+                        log_both(&mut vesa_log, "CFG", line);
                     }
-                } else {
-                    log_both(&mut vesa_log, "WARN", "boot.cfg not found");
                 }
             } else {
-                log_both(&mut vesa_log, "ERROR", "Failed to mount FAT32");
+                log_both(&mut vesa_log, "WARN", "boot.cfg not found");
             }
         } else {
-            log_both(&mut vesa_log, "WARN", "No ATA drive detected");
+            log_both(&mut vesa_log, "ERROR", "Failed to mount FAT32");
         }
+    } else {
+        log_both(&mut vesa_log, "WARN", "No ATA drive detected");
     }
 
     serial::send_string("\n[  OK ] CubeCORE v1.0 boot complete!\n");
@@ -319,22 +307,55 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
         logger.write_string("========================================\n\n");
     }
 
-    // === ЭТАП 15: Загрузка /bin/csh ===
-    log_both(&mut vesa_log, "INFO", "Loading /bin/csh...");
-    if loader::exec(&ata, &fs, "/bin/csh") {
-        log_both(&mut vesa_log, "OK", "Shell launched");
-    } else {
-        log_both(&mut vesa_log, "WARN", "Failed to launch shell");
-    }
+    // === Тест планировщика: две задачи ===
 
-    // Если exec вернулся (не должен), уходим в главный цикл
+    let stack_a = memory::alloc_page().expect("stack A");
+    let stack_b = memory::alloc_page().expect("stack B");
+    unsafe {
+        core::ptr::write_bytes(stack_a as *mut u8, 0, 4096);
+        core::ptr::write_bytes(stack_b as *mut u8, 0, 4096);
+    }
+    extern "C" { static _kernel_end: u8; }
+
+    let stack_a = memory::alloc_page().expect("stack A");
+    let stack_b = memory::alloc_page().expect("stack B");
+    let kend = unsafe { &_kernel_end as *const u8 as u64 };
+    serial::send_string("[SCHED] _kernel_end = 0x");
+    serial::send_string(write_hex(&mut buf, kend));
+    serial::send_string("[SCHED] task_a = 0x");
+    serial::send_string(write_hex(&mut buf, task_a as u64));
+    serial::send_string("\n");
+    serial::send_string("[SCHED] task_b = 0x");
+    serial::send_string(write_hex(&mut buf, task_b as u64));
+    serial::send_string("\n");
+
+    if stack_a < kend || stack_b < kend {
+        serial::log_error("PMM returned stack below kernel end!");
+    }
+    sched::spawn(task_a, stack_a, 1);
+    sched::spawn(task_b, stack_b, 1);
+    serial::log_ok("Test tasks A/B spawned");
+
     kernel_main_loop()
 }
 
 #[no_mangle]
 pub extern "C" fn kernel_main_loop() -> ! {
-    crate::serial::send_string("\n[KERNEL] Back in main loop after user exit\n");
+    crate::serial::send_string("\n[KERNEL] Back in main loop\n");
+
+    let mut last_ticks = 0u64;
+    let mut buf = [0u8; 20];
+
     loop {
+        // Проверка APIC тиков раз в ~секунду (100 Hz → +100)
+        let t = idt::TICKS.load(Ordering::Relaxed);
+        if t >= last_ticks + 100 {
+            last_ticks = t;
+            crate::serial::send_string("[APIC] ticks=");
+            crate::serial::send_string(write_num(&mut buf, t as usize));
+            crate::serial::send_string("\n");
+        }
+
         if let Some(sc) = interrupts::keyboard_pop() {
             crate::serial::send_string("[INPUT] scancode=0x");
             let mut h = [0u8; 2];
@@ -343,6 +364,7 @@ pub extern "C" fn kernel_main_loop() -> ! {
             crate::serial::send_string(core::str::from_utf8(&h).unwrap_or("?"));
             crate::serial::send_string("\n");
         }
+
         unsafe { core::arch::asm!("hlt") }
     }
 }

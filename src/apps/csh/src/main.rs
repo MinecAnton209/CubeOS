@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use cube_syscall::*;
+use core::arch::asm;
 
 // Must match KernelApi in src/cube_core/loader.rs; the kernel passes it in rdi.
 #[repr(C)]
@@ -66,54 +66,28 @@ fn keyboard_read() -> Option<u8> {
     Some(sc)
 }
 
-fn cmd_pwd(_args: &[u8]) {
-    let mut buf = [0u8; 256];
-    let n = getcwd(&mut buf);
-    if n > 0 {
-        print(&buf[..n as usize]);
-        print(b"\n");
+// Простая таблица сканкодов → ASCII (только буквы и цифры)
+fn scancode_to_ascii(sc: u8) -> Option<u8> {
+    match sc {
+        0x02 => Some(b'1'), 0x03 => Some(b'2'), 0x04 => Some(b'3'),
+        0x05 => Some(b'4'), 0x06 => Some(b'5'), 0x07 => Some(b'6'),
+        0x08 => Some(b'7'), 0x09 => Some(b'8'), 0x0A => Some(b'9'),
+        0x0B => Some(b'0'),
+        0x10 => Some(b'q'), 0x11 => Some(b'w'), 0x12 => Some(b'e'),
+        0x13 => Some(b'r'), 0x14 => Some(b't'), 0x15 => Some(b'y'),
+        0x16 => Some(b'u'), 0x17 => Some(b'i'), 0x18 => Some(b'o'),
+        0x19 => Some(b'p'),
+        0x1E => Some(b'a'), 0x1F => Some(b's'), 0x20 => Some(b'd'),
+        0x21 => Some(b'f'), 0x22 => Some(b'g'), 0x23 => Some(b'h'),
+        0x24 => Some(b'j'), 0x25 => Some(b'k'), 0x26 => Some(b'l'),
+        0x2C => Some(b'z'), 0x2D => Some(b'x'), 0x2E => Some(b'c'),
+        0x2F => Some(b'v'), 0x30 => Some(b'b'), 0x31 => Some(b'n'),
+        0x32 => Some(b'm'),
+        0x1C => Some(b'\n'),  // Enter
+        0x0E => Some(b'\x08'), // Backspace
+        0x39 => Some(b' '),    // Space
+        _ => None,
     }
-}
-
-fn cmd_cat(args: &[u8]) {
-    if args.is_empty() { eprint(b"cat: missing argument\n"); return; }
-    let fd = open(args, O_RDONLY);
-    if fd < 0 { eprint(b"cat: cannot open\n"); return; }
-    let mut buf = [0u8; 512];
-    loop {
-        let n = read(fd as usize, &mut buf);
-        if n <= 0 { break; }
-        write(STDOUT, &buf[..n as usize]);
-    }
-    close(fd as usize);
-}
-
-fn cmd_mkdir(args: &[u8]) {
-    if args.is_empty() { eprint(b"mkdir: missing argument\n"); return; }
-    if mkdir(args, 0o755) < 0 { eprint(b"mkdir: failed\n"); }
-}
-
-fn cmd_rm(args: &[u8]) {
-    if args.is_empty() { eprint(b"rm: missing argument\n"); return; }
-    if unlink(args) < 0 { eprint(b"rm: failed\n"); }
-}
-
-fn cmd_echo(args: &[u8]) {
-    print(args);
-    print(b"\n");
-}
-
-fn cmd_help(_args: &[u8]) {
-    print(b"Commands:\n");
-    print(b"  ls [path]     list directory\n");
-    print(b"  cd [path]     change directory\n");
-    print(b"  pwd           print working directory\n");
-    print(b"  cat <file>    print file contents\n");
-    print(b"  mkdir <path>  create directory\n");
-    print(b"  rm <path>     remove file\n");
-    print(b"  echo <text>   print text\n");
-    print(b"  help          this message\n");
-    print(b"  exit          quit shell\n");
 }
 
 #[no_mangle]
@@ -128,12 +102,9 @@ pub extern "C" fn _start(api: *const KernelApi) -> ! {
     let mut cmd_buf = [0u8; 256];
     let mut cmd_len = 0;
 
-    let mut line = [0u8; MAX_LINE];
     loop {
-        let mut cwd = [0u8; 256];
-        let cn = getcwd(&mut cwd);
-        if cn > 0 { print(&cwd[..cn as usize]); }
-        print(b"$ ");
+        // Выводим приглашение
+        serial_print("root@cubeos # ");
 
         // Читаем команду
         cmd_len = 0;
@@ -195,16 +166,16 @@ pub extern "C" fn _start(api: *const KernelApi) -> ! {
             }
             "" => {}
             _ => {
-                eprint(b"unknown command: ");
-                eprint(cmd);
-                eprint(b"\n");
+                serial_print("Unknown command: ");
+                serial_print(cmd);
+                serial_print("\n");
             }
         }
     }
 }
 
 #[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    eprint(b"[csh] panic\n");
-    loop {}
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    serial_print("\n[CSH] PANIC!\n");
+    loop { unsafe { asm!("cli; hlt") } }
 }

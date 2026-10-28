@@ -49,6 +49,14 @@ sudo umount "$MNT_BOOT"
 echo "Добавление пользовательских приложений..."
 sudo cp target/apps/x86_64-unknown-none/release/csh "$MNT_CUBEOS/bin/csh"
 
+echo "Обновление boot.cfg..."
+sudo tee $MNT_CUBEOS/system/config/boot.cfg > /dev/null << 'EOF'
+# CubeOS Boot Configuration
+mode=normal
+vesa=true
+cmdline=""
+EOF
+
 # Размонтируем
 sudo umount "$MNT_CUBEOS"
 sudo losetup -d "$LOOP_DEV"

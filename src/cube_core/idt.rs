@@ -1,7 +1,10 @@
 // src/cube_core/idt.rs
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const IDT_ENTRIES: usize = 256;
+
+pub static TICKS: AtomicU64 = AtomicU64::new(0);
 
 #[repr(C)]
 pub struct InterruptStackFrame {
@@ -41,7 +44,6 @@ impl IdtEntry {
     }
 }
 
-// Обёртка для выравнивания статика (repr на static запрещён)
 #[repr(C, align(16))]
 struct IdtArray([IdtEntry; IDT_ENTRIES]);
 
@@ -53,7 +55,7 @@ struct IdtPtr {
     base: u64,
 }
 
-// === Обработчики БЕЗ error code ===
+// ===== Исключения (без error code) =====
 macro_rules! gen_stub {
     ($name:ident, $num:expr) => {
         #[unsafe(naked)]
@@ -71,19 +73,18 @@ macro_rules! gen_stub {
     };
 }
 
-// === Обработчики С error code ===
-// На входе: [rsp] = error_code, [rsp+8] = RIP
+// ===== Исключения (с error code) =====
 macro_rules! gen_stub_error {
     ($name:ident, $num:expr) => {
         #[unsafe(naked)]
         extern "x86-interrupt" fn $name(_sf: &InterruptStackFrame, _error_code: u64) {
             core::arch::naked_asm!(
-                "push rdi",              // [rsp] = rdi, [rsp+8] = error_code
+                "push rdi",
                 "mov rdi, {num}",
-                "mov rsi, [rsp + 8]",    // error_code
+                "mov rsi, [rsp + 8]",
                 "call {handler}",
                 "pop rdi",
-                "add rsp, 8",            // снять error_code
+                "add rsp, 8",
                 "iretq",
                 num = const $num,
                 handler = sym exception_handler_with_code,
@@ -105,27 +106,95 @@ gen_stub!(isr22, 22); gen_stub!(isr23, 23); gen_stub!(isr24, 24); gen_stub!(isr2
 gen_stub!(isr26, 26); gen_stub!(isr27, 27); gen_stub!(isr28, 28); gen_stub!(isr29, 29);
 gen_stub!(isr30, 30); gen_stub!(isr31, 31);
 
+// ===== APIC timer (вектор 0x40) =====
+#[unsafe(naked)]
+extern "x86-interrupt" fn timer_handler(_sf: &InterruptStackFrame) {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "call {body}",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        body = sym timer_body,
+    );
+}
+
+#[no_mangle]
+extern "C" fn timer_body() {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::apic::eoi();
+    crate::sched::tick();
+}
+
+// ===== IRQ клавиатуры (0x21) через APIC =====
+#[unsafe(naked)]
+extern "x86-interrupt" fn keyboard_handler(_sf: &InterruptStackFrame) {
+    core::arch::naked_asm!(
+        "push rax",
+        "push rcx",
+        "push rdx",
+        "push rsi",
+        "push rdi",
+        "push r8",
+        "push r9",
+        "push r10",
+        "push r11",
+        "call {body}",
+        "pop r11",
+        "pop r10",
+        "pop r9",
+        "pop r8",
+        "pop rdi",
+        "pop rsi",
+        "pop rdx",
+        "pop rcx",
+        "pop rax",
+        "iretq",
+        body = sym keyboard_body,
+    );
+}
+
+#[no_mangle]
+extern "C" fn keyboard_body() {
+    let sc: u8;
+    unsafe { core::arch::asm!("in al, 0x60", out("al") sc); }
+    crate::interrupts::keyboard_push(sc);
+    crate::apic::eoi();
+}
+
+// ===== Заглушка для прочих IRQ =====
 #[unsafe(naked)]
 extern "x86-interrupt" fn irq_stub(_sf: &InterruptStackFrame) {
     core::arch::naked_asm!(
         "push rax",
-        "mov al, 0x20",
-        "mov dx, 0x20",
-        "out dx, al",
+        "call {body}",
         "pop rax",
         "iretq",
+        body = sym irq_body,
     );
 }
 
-extern "x86-interrupt" fn keyboard_handler(_sf: InterruptStackFrame) {
-    let scancode: u8;
-    unsafe {
-        core::arch::asm!("in al, 0x60", out("al") scancode);
-        crate::interrupts::keyboard_push(scancode);
-        core::arch::asm!("out 0x20, al", in("al") 0x20u8);
-    }
+#[no_mangle]
+extern "C" fn irq_body() {
+    crate::apic::eoi();
 }
 
+// ===== Обработчики исключений =====
 #[no_mangle]
 pub extern "C" fn exception_handler(int_num: u64) {
     crate::serial::log_error("EXCEPTION");
@@ -206,10 +275,14 @@ pub unsafe fn init_idt() {
     IDT.0[30].set_handler_addr(isr30 as u64);
     IDT.0[31].set_handler_addr(isr31 as u64);
 
+    // IRQ-заглушки 0x20..0x2F — на случай, если что-то придёт
     for i in 0..16 {
         IDT.0[0x20 + i].set_handler_addr(irq_stub as u64);
     }
+
+    // Переопределяем конкретные
     IDT.0[0x21].set_handler_addr(keyboard_handler as u64);
+    IDT.0[0x40].set_handler_addr(timer_handler as u64);
 
     let idt_ptr = IdtPtr {
         limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
