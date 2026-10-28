@@ -336,8 +336,8 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
     if stack_a < kend || stack_b < kend {
         serial::log_error("PMM returned stack below kernel end!");
     }
-    sched::spawn(task_a, stack_a, 1);
-    sched::spawn(task_b, stack_b, 1);
+    sched::spawn(task_a, stack_a, 1, sched::Qos::Interactive, b"task_a");
+    sched::spawn(task_b, stack_b, 1, sched::Qos::Utility, b"task_b");
     serial::log_ok("Test tasks A/B spawned");
 
     kernel_main_loop()

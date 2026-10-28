@@ -54,7 +54,7 @@ sudo tee $MNT_CUBEOS/system/config/boot.cfg > /dev/null << 'EOF'
 # CubeOS Boot Configuration
 mode=normal
 vesa=true
-cmdline="/bin/csh"
+cmdline=""
 EOF
 
 # Размонтируем
