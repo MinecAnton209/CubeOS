@@ -141,10 +141,29 @@ extern "C" fn user_entry_trampoline() -> ! {
     );
 }
 
+// Runs from another task's tick: the zombie may still be the one executing exit_current.
+fn reap_zombies(cur: usize) {
+    unsafe {
+        for i in 0..MAX_TASKS {
+            if i == cur || RQ.tasks[i].state != State::Zombie { continue; }
+            let t = &mut RQ.tasks[i];
+            if t.is_user() {
+                crate::vmm::destroy_pml4(t.cr3);
+            }
+            for p in 0..t.stack_pages {
+                crate::memory::free_page(t.stack_base + (p as u64) * 4096);
+            }
+            *t = Task::free();
+            RQ.count -= 1;
+            crate::serial::send_string("[SCHED] zombie task reaped\n");        }
+    }
+}
+
 pub fn tick() {
     unsafe {
         TS.tick(&mut RQ);
         let cur = CURRENT.load(Ordering::Relaxed);
+        reap_zombies(cur);
 
         if RQ.tasks[cur].quantum != u32::MAX {
             RQ.tasks[cur].quantum = RQ.tasks[cur].quantum.saturating_sub(1);
