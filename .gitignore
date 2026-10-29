@@ -25,5 +25,6 @@ target/
 int
 src/cube_core/Cargo.lock
 Cargo.lock
+build/
 iso/
 libkernel.a

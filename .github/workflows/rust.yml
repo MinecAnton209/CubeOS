@@ -17,11 +17,11 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    # 1. Устанавливаем зависимости для сборки ядра, ISO и (если нужно) HDD
+    # 1. Системные зависимости: сборка ядра, ISO (xorriso, grub) и HDD без root (mtools, util-linux)
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y nasm gcc build-essential xorriso mtools grub-pc-bin grub-common parted dosfstools
+        sudo apt-get install -y nasm gcc build-essential xorriso mtools grub-pc-bin grub-common
 
     # 2. Устанавливаем Rust nightly
     - name: Install Rust nightly
@@ -29,23 +29,23 @@ jobs:
       with:
         components: rust-src, llvm-tools-preview
 
-    # 3. Собираем ядро через make
-    - name: Build Kernel
-      run: make
+    # 3. Ядро и csh
+    - name: Build kernel and shell
+      run: make all
 
-    # 4. Собираем ISO через make (это проверит работу GRUB и xorriso)
+    # 4. ISO (проверяет GRUB и xorriso)
     - name: Build ISO
-      run: make cubeos.iso
+      run: make iso
 
-    # 5. (Опционально) Пытаемся собрать HDD-образ
-    # Если этот шаг упадет из-за ограничений loop-устройств на GitHub, 
-    # мы просто поставим || true, чтобы не ломать билд.
-    - name: Build HDD Image
-      run: |
-        sudo bash create_hdd.sh || echo "HDD build failed or skipped in CI"
-      continue-on-error: true
+    # 5. HDD-образ
+    - name: Build HDD image
+      run: make hdd
 
-    # 6. Сохраняем собранные артефакты (чтобы их можно было скачать)
+    # 6. Host-тесты
+    - name: Run host tests
+      run: make test
+
+    # 7. Сохраняем собранные артефакты (чтобы их можно было скачать)
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:

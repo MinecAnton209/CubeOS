@@ -30,17 +30,20 @@ To build CubeOS from source, you need a Linux environment (preferably Debian/Ubu
 git clone https://github.com/cubeweb-lab/CubeOS.git
 cd CubeOS
 
-# Build the kernel
-make
+# Build the kernel and csh
+make all
 
 # Create a bootable ISO
-make cubeos.iso
-# OR create an HDD image
-bash create_hdd.sh
-bash update_system.sh
+make iso
+# OR create/update the HDD image (no root needed)
+make hdd
 
-# 4. Run in QEMU
-make run
+# Run in QEMU
+make run        # from the ISO
+make run-hdd    # from the HDD image
+
+# Host-side tests
+make test
 ```
 
 Contributing
