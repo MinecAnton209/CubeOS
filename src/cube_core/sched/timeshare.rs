@@ -1,8 +1,10 @@
-// src/cube_core/sched/timeshare.rs
 use super::task::{Task, State, Qos};
+use super::runqueue::{RunQueue, MAX_TASKS};
 
-pub const AGING_INTERVAL: u32 = 50;   // каждые 50 тиков — aging
-pub const DECAY_INTERVAL: u32 = 100;  // каждые 100 тиков — decay для активных
+pub const AGING_INTERVAL: u64 = 5;
+pub const DECAY_INTERVAL: u64 = 5;
+pub const AGING_MAX: u8 = 60;
+pub const DECAY_MIN: u8 = 80;
 
 pub struct TimeshareState {
     pub tick_counter: u64,
@@ -11,25 +13,22 @@ pub struct TimeshareState {
 impl TimeshareState {
     pub const fn new() -> Self { Self { tick_counter: 0 } }
 
-    /// Каждый тик: для всех Ready (не Running) — ticks_waited += 1.
-    /// Раз в AGING_INTERVAL: priority += 1 (до base_priority.max(...)).
-    pub fn tick(&mut self, rq: &mut super::runqueue::RunQueue) {
+    pub fn tick(&mut self, rq: &mut RunQueue) {
         self.tick_counter = self.tick_counter.wrapping_add(1);
 
-        for i in 0..super::runqueue::MAX_TASKS {
-            if rq.tasks[i].state == State::Ready
-                && rq.tasks[i].qos != Qos::Idle
-                {
-                    rq.tasks[i].ticks_waited = rq.tasks[i].ticks_waited.saturating_add(1);
-                }
+        // Aging: каждый Ready +1 tick_waited
+        for i in 0..MAX_TASKS {
+            if rq.tasks[i].state == State::Ready && rq.tasks[i].qos != Qos::Idle {
+                rq.tasks[i].ticks_waited = rq.tasks[i].ticks_waited.saturating_add(1);
+            }
         }
 
-        if self.tick_counter % AGING_INTERVAL as u64 == 0 {
-            // Голодающие (ticks_waited > AGING_INTERVAL) — priority += 1
-            for i in 0..super::runqueue::MAX_TASKS {
+        // Aging раз в 25 тиков — поднять голодающих
+        if self.tick_counter % AGING_INTERVAL == 0 {
+            for i in 0..MAX_TASKS {
                 if rq.tasks[i].state == State::Ready
-                    && rq.tasks[i].ticks_waited >= AGING_INTERVAL
-                    && rq.tasks[i].priority < rq.tasks[i].base_priority.saturating_add(40)
+                    && rq.tasks[i].ticks_waited >= AGING_INTERVAL as u32
+                    && rq.tasks[i].priority < rq.tasks[i].base_priority.saturating_add(AGING_MAX)
                     {
                         rq.tasks[i].priority = rq.tasks[i].priority.saturating_add(1);
                         rq.tasks[i].ticks_waited = 0;
@@ -38,22 +37,17 @@ impl TimeshareState {
             }
         }
 
-        if self.tick_counter % DECAY_INTERVAL as u64 == 0 {
-            // Активные — priority -= 1 (до base)
-            for i in 0..super::runqueue::MAX_TASKS {
+        // Decay раз в 20 тиков — опустить активных НИЖЕ base
+        if self.tick_counter % DECAY_INTERVAL == 0 {
+            for i in 0..MAX_TASKS {
                 if rq.tasks[i].state == State::Running
-                    && rq.tasks[i].priority > rq.tasks[i].base_priority
+                    && rq.tasks[i].qos != Qos::Idle
+                    && rq.tasks[i].priority > rq.tasks[i].base_priority.saturating_sub(DECAY_MIN)
                     {
                         rq.tasks[i].priority = rq.tasks[i].priority.saturating_sub(1);
                         rq.tasks[i].ticks_waited = 0;
                     }
             }
         }
-    }
-
-    /// Сбросить quantum текущей задачи.
-    pub fn reset_quantum(&mut self, task: &mut Task) {
-        task.reset_quantum();
-        task.ticks_waited = 0;
     }
 }

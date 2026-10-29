@@ -1,5 +1,3 @@
-// src/cube_core/sched/context.rs
-
 core::arch::global_asm!(
     r#"
     .global context_switch

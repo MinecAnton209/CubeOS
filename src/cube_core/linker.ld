@@ -28,11 +28,19 @@ SECTIONS {
         *(.bss .bss.*)
     }
 
-    .stack (NOLOAD) : ALIGN(16) {
-        _stack_bottom = .;
-        . += 0x40000;
-        _stack_top = .;
+    .program_buf ALIGN(4K) : {
+        KEEP(*(.program_buf))
     }
 
+    .kernel_stack ALIGN(4K) : {
+        KEEP(*(.kernel_stack))
+    }
+
+    /* Запас под RSP ядра */
+    . = ALIGN(16);
+    . += 0x40000;
     _kernel_end = .;
+
+    /* Символ для boot.asm */
+    _stack_top = _kernel_end;
 }

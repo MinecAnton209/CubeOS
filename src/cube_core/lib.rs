@@ -28,6 +28,7 @@ use core::arch::asm;
 use core::sync::atomic::Ordering;
 use fs::FSManager;
 use ata::AtaDrive;
+use sched::Qos;
 
 fn get_cpu_info() -> ([u8; 12], u32) {
     let mut vendor = [0u8; 12];
@@ -279,14 +280,23 @@ pub extern "C" fn rust_main(magic: u32, info_addr: u32) -> ! {
 
                     if let Some(cmd) = cmdline {
                         log_both(&mut vesa_log, "INFO", "Launching program from cmdline...");
-                        if loader::exec(&ata, &fs, cmd) {
-                            log_both(&mut vesa_log, "OK", "Program launched successfully");
-                        } else {
-                            log_both(&mut vesa_log, "ERROR", "Failed to launch program");
+                        match loader::exec_user(&ata, &fs, cmd, sched::Qos::Interactive) {
+                            Some(pid) => {
+                                log_both(&mut vesa_log, "OK", "Program launched (user task)");
+                                let mut nb = [0u8; 20];
+                                serial::send_string("[SCHED] pid=");
+                                serial::send_string(write_num(&mut nb, pid as usize));
+                                serial::send_string("\n");
+                            }
+                            None => {
+                                log_both(&mut vesa_log, "ERROR", "Failed to launch program");
+                            }
                         }
                     } else {
-                        log_both(&mut vesa_log, "INFO", "No cmdline in config, skipping program launch");
+                        log_both(&mut vesa_log, "INFO", "No cmdline, skipping launch");
                     }
+
+                    kernel_main_loop()
                 }
                 if let Ok(text) = core::str::from_utf8(&config_buf[..size]) {
                     for line in text.lines() {

@@ -35,7 +35,6 @@ impl Qos {
 }
 
 #[repr(C)]
-#[derive(Copy, Clone)]
 pub struct Task {
     pub rsp: u64,
     pub state: State,
@@ -47,12 +46,11 @@ pub struct Task {
     pub ticks_waited: u32,
     pub stack_base: u64,
     pub stack_pages: usize,
-    /// Физ. адрес PML4 для этого процесса (CR3).
-    /// 0 = kernel task (не переключаем CR3).
+
+    /// PML4 для этого процесса. 0 = kernel task (identity, KERNEL_CR3).
+    /// Владелец AddressSpace: при уничтожении task — aspace.destroy().
     pub cr3: u64,
-    /// Вершина user-стека (для iretq при fork/exec).
     pub user_rsp: u64,
-    /// Точка входа user (для fork/exec).
     pub user_rip: u64,
     pub name: [u8; 16],
 }
@@ -76,3 +74,4 @@ impl Task {
         self.cr3 != 0
     }
 }
+

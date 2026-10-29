@@ -134,10 +134,7 @@ pub fn load_elf(data: &[u8], space: &mut AddressSpace) -> Option<LoadedProgram> 
         let mut page = first;
         while page < end {
             // Segments can share a page; reuse the frame an earlier segment already mapped.
-            let frame = match space.translate(page) {
-                Some(frame) => frame,
-                None => space.map_user_zeroed(page, writable)?,
-            };
+            let frame = space.map_user_zeroed(page, writable)?;
 
             let copy_start = page.max(phdr.p_vaddr);
             let copy_end = (page + PAGE_SIZE).min(file_end);

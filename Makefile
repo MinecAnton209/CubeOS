@@ -32,7 +32,7 @@ csh: $(CSH)
 iso: $(ISO)
 
 hdd: $(HDD) $(KERNEL) $(CSH) config/boot.cfg
-	-mmd -i $(HDD)@@$(SYSTEM_OFFSET) ::/system ::/system/kernel ::/system/config ::/bin ::/home ::/tmp ::/etc
+	-mmd -D -i $(HDD)@@$(SYSTEM_OFFSET) ::/system ::/system/kernel ::/system/config ::/bin ::/home ::/tmp ::/etc
 	mcopy -o -i $(HDD)@@$(SYSTEM_OFFSET) $(KERNEL) $(SYSTEM_KERNEL)
 	mcopy -o -i $(HDD)@@$(SYSTEM_OFFSET) $(CSH) ::/bin/csh
 	mcopy -o -i $(HDD)@@$(SYSTEM_OFFSET) config/boot.cfg ::/system/config/boot.cfg
@@ -69,7 +69,9 @@ $(KERNEL): $(BUILD)/boot.o $(BUILD)/ata.o $(KERNEL_LIB) linker.ld
 	$(LD) -T linker.ld -o $@ $(BUILD)/boot.o $(BUILD)/ata.o $(KERNEL_LIB) --gc-sections -z max-page-size=0x1000
 
 $(CSH): FORCE
-	cd src/apps/csh && $(CARGO) build --release --target-dir ../../../target/apps
+	cd src/apps/csh && RUSTFLAGS="-C link-arg=-Tlinker.ld -C relocation-model=static -C code-model=large" \
+		$(CARGO) build -Z build-std=core,compiler_builtins \
+		--target $(TARGET) --release --target-dir ../../../target/apps
 
 $(ISO): $(KERNEL) config/grub.cfg
 	rm -rf $(BUILD)/iso

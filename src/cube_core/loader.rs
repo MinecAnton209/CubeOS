@@ -1,95 +1,78 @@
-// src/cube_core/loader.rs — загрузчик программ
-use crate::elf;
-use crate::fs::FSManager;
 use crate::ata::AtaDrive;
-use crate::vmm::{self, AddressSpace};
+use crate::fs::FSManager;
+use crate::vmm::{AddressSpace, USER_LIMIT};
+use crate::sched::{self, Qos};
 
-static mut PROGRAM_BUF: [u8; 65536] = [0; 65536];
+const MAX_PROGRAM_SIZE: usize = 65536;
 
-// Passed to the program in rdi; the layout must match KernelApi in the userland program.
-#[repr(C)]
-pub struct KernelApi {
-    pub putc: extern "C" fn(u8),
-    pub clear: extern "C" fn(),
-}
+#[repr(C, align(4096))]
+struct ProgramBuf([u8; MAX_PROGRAM_SIZE]);
 
-static KERNEL_API: KernelApi = KernelApi {
-    putc: crate::vesa_log::console_putc,
-    clear: crate::vesa_log::console_clear,
-};
+#[link_section = ".program_buf"]
+static mut PROGRAM_BUF: ProgramBuf = ProgramBuf([0; MAX_PROGRAM_SIZE]);
 
-pub fn exec(ata: &AtaDrive, fs: &FSManager, path: &str) -> bool {
-    crate::serial::send_string("[LOADER] Loading: ");
-    crate::serial::send_string(path);
-    crate::serial::send_string("\n");
+#[repr(C, align(16))]
+struct KernelStack([u8; 16384]);
 
+#[link_section = ".kernel_stack"]
+static mut KERNEL_STACK: KernelStack = KernelStack([0; 16384]);
+
+const USER_STACK_TOP: u64 = USER_LIMIT - 0x10000;   // 0x7FFF_FFFF_0000
+const USER_STACK_PAGES: u64 = 4;
+
+pub fn exec_user(
+    ata: &AtaDrive,
+    fs: &FSManager,
+    path: &str,
+    qos: Qos,
+) -> Option<u64> {
     unsafe {
-        let size = match fs.read_file(ata, path, &mut PROGRAM_BUF) {
-            Some(s) => {
-                crate::serial::send_string("[LOADER] Read ");
-                let mut num_buf = [0u8; 20];
-                let mut n = s;
-                let mut i = 20;
-                while n > 0 { i -= 1; num_buf[i] = (n % 10) as u8 + b'0'; n /= 10; }
-                crate::serial::send_string(core::str::from_utf8(&num_buf[i..]).unwrap_or("?"));
-                crate::serial::send_string(" bytes\n");
-                s
-            },
-            None => {
-                crate::serial::send_string("[LOADER] ERROR: File not found!\n");
-                return false;
-            }
-        };
-
-        if size == 0 {
-            crate::serial::send_string("[LOADER] ERROR: File is empty!\n");
-            return false;
+        let size = fs.read_file(ata, path, &mut PROGRAM_BUF.0)?;
+        if size < 4 || PROGRAM_BUF.0[0..4] != *b"\x7fELF" {
+            crate::serial::send_string("[LOADER] Invalid ELF magic\n");
+            return None;
         }
 
-        // Проверяем ELF magic
-        if PROGRAM_BUF[0] != 0x7F || PROGRAM_BUF[1] != b'E' || PROGRAM_BUF[2] != b'L' || PROGRAM_BUF[3] != b'F' {
-            crate::serial::send_string("[LOADER] ERROR: Not a valid ELF file!\n");
-            return false;
-        }
+        // TSS.rsp0 — kernel stack для IRQ/exception из user
+        let ks_top = (&raw const KERNEL_STACK as *const u8 as u64) + 16384;
+        crate::tss::init_tss(ks_top);
+        crate::serial::send_string("[LOADER] TSS.rsp0 set\n");
 
-        crate::serial::send_string("[LOADER] Valid ELF detected\n");
+        let mut aspace = AddressSpace::new()?;
+        crate::serial::send_string("[LOADER] AddressSpace created\n");
 
-        let mut space = match AddressSpace::new() {
-            Some(s) => s,
-            None => {
-                crate::serial::send_string("[LOADER] ERROR: out of memory for address space\n");
-                return false;
-            }
-        };
-
-        let program = match elf::load_elf(&PROGRAM_BUF[..size], &mut space) {
-            Some(p) => p,
-            None => {
-                crate::serial::send_string("[LOADER] ERROR: ELF load failed\n");
-                space.destroy();
-                return false;
-            }
-        };
-
-        crate::serial::send_string("[LOADER] Entry: 0x");
-        let mut hex_buf = [0u8; 16];
+        let program = crate::elf::load_elf(&PROGRAM_BUF.0[..size], &mut aspace)?;
+        crate::serial::send_string("[LOADER] ELF mapped at 0x");
+        let mut hb = [0u8; 16];
         for i in 0..16 {
-            let nibble = ((program.entry_point >> ((15 - i) * 4)) & 0xF) as u8;
-            hex_buf[i] = if nibble < 10 { b'0' + nibble } else { b'A' + nibble - 10 };
+            let n = ((program.entry_point >> ((15 - i) * 4)) & 0xF) as u8;
+            hb[i] = if n < 10 { b'0' + n } else { b'A' + n - 10 };
         }
-        crate::serial::send_string(core::str::from_utf8(&hex_buf).unwrap_or("?"));
+        crate::serial::send_string(core::str::from_utf8(&hb).unwrap_or("?"));
         crate::serial::send_string("\n");
 
-        crate::serial::send_string("[LOADER] Jumping...\n");
+        for i in 0..USER_STACK_PAGES {
+            let v = USER_STACK_TOP - (i + 1) * 4096;
+            if aspace.map_user_zeroed(v, true).is_none() {
+                crate::serial::send_string("[LOADER] Failed to map user stack\n");
+                return None;
+            }
+        }
+        crate::serial::send_string("[LOADER] User stack mapped\n");
 
-        crate::vesa_log::console_reset();
-        let entry: extern "C" fn(*const KernelApi) = core::mem::transmute(program.entry_point);
-        space.activate();
-        entry(&KERNEL_API);
+        let kernel_stack = crate::memory::alloc_page()?;
+        core::ptr::write_bytes(kernel_stack as *mut u8, 0, 4096);
 
-        vmm::load_cr3(vmm::kernel_cr3());
-        space.destroy();
+        let name = path.rsplit('/').next().unwrap_or("user");
+        let pml4 = aspace.pml4_phys();
+
+        sched::spawn_user(
+            pml4,
+            program.entry_point,
+            USER_STACK_TOP - 16,
+            kernel_stack,
+            qos,
+            name.as_bytes(),
+        )
     }
-
-    false
 }

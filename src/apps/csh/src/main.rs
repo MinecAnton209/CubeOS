@@ -5,7 +5,7 @@ use core::arch::asm;
 
 // Must match KernelApi in src/cube_core/loader.rs; the kernel passes it in rdi.
 #[repr(C)]
-struct KernelApi {
+pub struct KernelApi {
     putc: extern "C" fn(u8),
     clear: extern "C" fn(),
 }
@@ -93,84 +93,11 @@ fn scancode_to_ascii(sc: u8) -> Option<u8> {
 #[no_mangle]
 pub extern "C" fn _start(api: *const KernelApi) -> ! {
     unsafe { API = api };
-    serial_print("\n");
-    serial_print("========================================\n");
-    serial_print("  CubeOS Shell v0.1 (csh)\n");
-    serial_print("========================================\n");
-    serial_print("Type 'help' for commands, 'exit' to quit\n\n");
 
-    let mut cmd_buf = [0u8; 256];
-    let mut cmd_len = 0;
-
+    // TODO: KernelApi не виден из user-PML4. Перевести на syscall.
+    // Пока — просто loop, чтобы проверить, что user-mode работает.
     loop {
-        // Выводим приглашение
-        serial_print("root@cubeos # ");
-
-        // Читаем команду
-        cmd_len = 0;
-        loop {
-            let sc = match keyboard_read() {
-                Some(sc) => sc,
-                None => continue,
-            };
-
-            // Игнорируем отпускание клавиш
-            if sc & 0x80 != 0 {
-                continue;
-            }
-
-            if let Some(ch) = scancode_to_ascii(sc) {
-                if ch == b'\n' {
-                    out_byte(b'\n');
-                    break;
-                } else if ch == b'\x08' {
-                    // Backspace
-                    if cmd_len > 0 {
-                        cmd_len -= 1;
-                        serial_print("\x08 \x08");
-                    }
-                } else if cmd_len < 255 {
-                    cmd_buf[cmd_len] = ch;
-                    cmd_len += 1;
-                    out_byte(ch);
-                }
-            }
-        }
-
-        // Парсим команду
-        let cmd = core::str::from_utf8(&cmd_buf[..cmd_len]).unwrap_or("");
-        let cmd = cmd.trim();
-
-        match cmd {
-            "help" => {
-                serial_print("Available commands:\n");
-                serial_print("  help    - show this help\n");
-                serial_print("  echo    - print text\n");
-                serial_print("  clear   - clear screen\n");
-                serial_print("  exit    - exit shell\n");
-                serial_print("\n");
-            }
-            "clear" => {
-                // ANSI clears a serial terminal; the framebuffer console clears through the kernel API
-                serial_only("\x1B[2J\x1B[H");
-                console_clear();
-            }
-            "exit" => {
-                serial_print("Goodbye!\n");
-                loop { unsafe { asm!("cli; hlt") } }
-            }
-            _ if cmd.starts_with("echo ") => {
-                let text = &cmd[5..];
-                serial_print(text);
-                serial_print("\n");
-            }
-            "" => {}
-            _ => {
-                serial_print("Unknown command: ");
-                serial_print(cmd);
-                serial_print("\n");
-            }
-        }
+        unsafe { core::arch::asm!("hlt"); }
     }
 }
 
