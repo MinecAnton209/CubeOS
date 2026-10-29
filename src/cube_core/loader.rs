@@ -11,12 +11,6 @@ struct ProgramBuf([u8; MAX_PROGRAM_SIZE]);
 #[link_section = ".program_buf"]
 static mut PROGRAM_BUF: ProgramBuf = ProgramBuf([0; MAX_PROGRAM_SIZE]);
 
-#[repr(C, align(16))]
-struct KernelStack([u8; 16384]);
-
-#[link_section = ".kernel_stack"]
-static mut KERNEL_STACK: KernelStack = KernelStack([0; 16384]);
-
 const USER_STACK_TOP: u64 = USER_LIMIT - 0x10000;   // 0x7FFF_FFFF_0000
 const USER_STACK_PAGES: u64 = 4;
 
@@ -32,11 +26,6 @@ pub fn exec_user(
             crate::serial::send_string("[LOADER] Invalid ELF magic\n");
             return None;
         }
-
-        // TSS.rsp0 — kernel stack для IRQ/exception из user
-        let ks_top = (&raw const KERNEL_STACK as *const u8 as u64) + 16384;
-        crate::tss::init_tss(ks_top);
-        crate::serial::send_string("[LOADER] TSS.rsp0 set\n");
 
         let mut aspace = AddressSpace::new()?;
         crate::serial::send_string("[LOADER] AddressSpace created\n");

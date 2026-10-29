@@ -38,6 +38,7 @@ pub fn init() {
         RQ.count = 1;
         CURRENT.store(0, Ordering::Relaxed);
     }
+    crate::tss::init();
 }
 
 pub fn kernel_cr3() -> u64 { unsafe { KERNEL_CR3 } }
@@ -162,6 +163,11 @@ pub fn tick() {
         }
         RQ.tasks[next].state = State::Running;
         CURRENT.store(next, Ordering::Relaxed);
+
+        if RQ.tasks[next].is_user() {
+            let kernel_top = RQ.tasks[next].stack_base + (RQ.tasks[next].stack_pages as u64) * 4096;
+            crate::tss::set_rsp0(kernel_top);
+        }
 
         context::context_switch(
             &mut RQ.tasks[cur].rsp,
